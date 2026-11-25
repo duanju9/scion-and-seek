@@ -299,12 +299,13 @@ def refresh(cfg, state_path, logged_check=None):
         return state
     try:
         return _refresh_locked(cfg, state_path, state, log, now, run_keyword,
-                               all_keywords, kw_idx)
+                               all_keywords, kw_idx, logged_check)
     finally:
         release_lock(lock_path)
 
 
-def _refresh_locked(cfg, state_path, state, log, now, run_keyword, all_keywords, kw_idx):
+def _refresh_locked(cfg, state_path, state, log, now, run_keyword, all_keywords, kw_idx,
+                    logged_check=None):
     """持锁执行真正的刷新流程。"""
     out_dir = cfg["output_dir"]
     hist_dir = cfg["history_dir"]
