@@ -85,6 +85,71 @@ def backfill_from_previous(master_path, previous_path, csv_path,
     return filled
 
 
+def jd_coverage(jobs):
+    """JD 覆盖率；没有岗位时按 1.0 处理，避免除零。"""
+    if not jobs:
+        return 1.0
+    return sum(1 for j in jobs if j.get("has_jd") == "yes") / float(len(jobs))
+
+
+def backfill_missing_jd(master_path, csv_path, run_keyword, cfg, tmp_dir, log,
+                        min_coverage=0.9, round_timeout=600):
+    """JD 覆盖率不足时补一轮，只抓缺 JD 的岗位，抓完重新合并主表。
+
+    第 3 步补抓有总超时，新增岗位一多就会被截断，缺口会被固化进主表和快照。
+    这里在合并之后做一次有上限的兜底：单轮只补缺失部分，仍补不齐就把覆盖率
+    写回 state 交给巡检读取，不再静默留缺口。
+
+    返回 (jobs, 本轮尝试补抓条数, 最终覆盖率)。
+    """
+    data = _load(master_path, {}) or {}
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    if not jobs:
+        return jobs, 0, 1.0
+    cov = jd_coverage(jobs)
+    missing = [j for j in jobs if j.get("has_jd") != "yes"]
+    if not missing or cov >= min_coverage:
+        return jobs, 0, cov
+
+    log.append(f"[4.5/7] JD 覆盖率 {cov:.1%} < {min_coverage:.0%}，"
+               f"对 {len(missing)} 条缺失岗位补抓一轮")
+    jobs_dump = os.path.join(tmp_dir, "backfill_jobs.json")
+    seeds = os.path.join(tmp_dir, "backfill_seeds.json")
+    merged = os.path.join(tmp_dir, "backfill_details.json")
+    stamp = data.get("scraped_at", "") if isinstance(data, dict) else ""
+    with open(jobs_dump, "w", encoding="utf-8") as f:
+        json.dump({"scraped_at": stamp, "keyword": run_keyword, "jobs": jobs},
+                  f, ensure_ascii=False)
+    with open(seeds, "w", encoding="utf-8") as f:
+        json.dump([{"job_id": j.get("job_id", ""), "jd": j.get("jd", "")}
+                   for j in jobs if j.get("jd")], f, ensure_ascii=False)
+
+    ok, _ = _run([PY, os.path.join(HERE, "fetch_missing_details.py"),
+                  "--jobs", jobs_dump, "--details", seeds, "--output", merged,
+                  "--cdp-port", str(cfg["cdp_port"]),
+                  "--gap-min", str(cfg.get("gap_min", 2.5)),
+                  "--gap-max", str(cfg.get("gap_max", 5)),
+                  "--limit", str(len(missing))], round_timeout, log)
+    if not ok or not os.path.isfile(merged):
+        log.append("JD 兜底补抓未成功，缺口保留并登记到 state")
+        return jobs, 0, cov
+
+    ok, _ = _run([PY, os.path.join(HERE, "merge_to_master.py"),
+                  "--jobs", jobs_dump, "--details", merged,
+                  "--out-json", master_path, "--out-csv", csv_path,
+                  "--source-keyword", run_keyword], 180, log)
+    if not ok:
+        log.append("JD 兜底合并失败，缺口保留并登记到 state")
+        return jobs, 0, cov
+
+    fresh = _load(master_path, {}) or {}
+    jobs = fresh.get("jobs", []) if isinstance(fresh, dict) else fresh
+    cov2 = jd_coverage(jobs)
+    left = sum(1 for j in jobs if j.get("has_jd") != "yes")
+    log.append(f"兜底补抓后 JD 覆盖率 {cov2:.1%}（仍缺 {left} 条）")
+    return jobs, len(missing), cov2
+
+
 def _run(cmd, timeout, log):
     """执行子脚本，返回 (ok, 输出摘要)。"""
     log.append("$ " + " ".join(cmd))
@@ -122,6 +187,37 @@ def _logged_in(cdp_port):
         return False, f"CDP 连接失败：{e}"
 
 
+def load_keywords(cfg):
+    """关键词来源优先级：命令行 --keywords > output/keywords.json > --keyword。
+
+    keywords.json 让服务被 patrol_once 重启后仍保持多关键词轮换，
+    不用每次手工补参数。
+    """
+    kws = [k.strip() for k in (cfg.get("keywords") or []) if str(k).strip()]
+    if kws:
+        return kws
+    path = os.path.join(cfg.get("output_dir") or "", "keywords.json")
+    if cfg.get("output_dir") and os.path.isfile(path):
+        data = _load(path, None)
+        if isinstance(data, dict):
+            data = data.get("keywords")
+        if isinstance(data, list):
+            kws = [str(k).strip() for k in data if str(k).strip()]
+            if kws:
+                return kws
+    return [cfg.get("keyword") or "AI 工程师"]
+
+
+def keyword_plan(cfg, state):
+    """多关键词轮换：返回 (本轮关键词, 全部关键词, 本轮序号)。"""
+    kws = load_keywords(cfg)
+    try:
+        idx = int(state.get("keyword_index") or 0) % len(kws)
+    except Exception:
+        idx = 0
+    return kws[idx], kws, idx
+
+
 def refresh(cfg, state_path, logged_check=None):
     """执行一次完整刷新，返回最终 state。
 
@@ -130,9 +226,12 @@ def refresh(cfg, state_path, logged_check=None):
     """
     state = _load(state_path, {}) or {}
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    run_keyword, all_keywords, kw_idx = keyword_plan(cfg, state)
     state.update({
         "status": "running", "started_at": now, "finished_at": "",
         "error": "", "steps": [], "ok_jobs": 0, "ok_jd": 0,
+        "keyword": run_keyword, "keywords": all_keywords,
+        "keyword_index": kw_idx, "new_jobs": 0,
     })
     log = _Logger(state, state_path)
     _write_state(state_path, state)
@@ -167,9 +266,10 @@ def refresh(cfg, state_path, logged_check=None):
             raise RuntimeError("专用浏览器未登录，请先在工作台完成登录；不启动采集")
 
         # 1. 列表（不抓详情，快）
-        log.append(f"[1/7] 采集列表：关键词={cfg['keyword']} 城市={cfg['city']} 页数={cfg['pages']}")
+        log.append(f"[1/7] 采集列表：关键词={run_keyword}"
+                   f"（第 {kw_idx + 1}/{len(all_keywords)} 个）城市={cfg['city']} 页数={cfg['pages']}")
         ok, _ = _run([PY, os.path.join(HERE, "boss_cdp_raw.py"),
-                      "--keyword", cfg["keyword"], "--city", cfg["city"],
+                      "--keyword", run_keyword, "--city", cfg["city"],
                       "--pages", str(cfg["pages"]), "--no-detail",
                       "--output", tmp_jobs, "--cdp-port", str(cfg["cdp_port"])],
                      600, log)
@@ -203,11 +303,14 @@ def refresh(cfg, state_path, logged_check=None):
                 with open(merged_details, "w", encoding="utf-8") as f:
                     json.dump([], f)
 
-        # 4. 合并主表
-        log.append("[4/7] 合并主表")
+        # 4. 合并主表（当轮 + 上轮余量，按 job_id 去重）
+        log.append("[4/7] 合并主表（并集，保留其它关键词的存量岗位）")
         ok, _ = _run([PY, os.path.join(HERE, "merge_to_master.py"),
                       "--jobs", tmp_jobs, "--details", merged_details,
-                      "--out-json", master, "--out-csv", csv_out], 120, log)
+                      "--out-json", master, "--out-csv", csv_out,
+                      "--source-keyword", run_keyword,
+                      "--carry-from", prev_master,
+                      "--keep-days", str(cfg.get("keep_days", 7))], 120, log)
         if not ok:
             raise RuntimeError("合并主表失败")
         if os.path.isfile(prev_master):
@@ -216,8 +319,28 @@ def refresh(cfg, state_path, logged_check=None):
                 log.append(f"从上期回填 {n} 个缺失字段（主要是 Boss 活跃状态）")
         fresh = _load(master, {}) or {}
         fresh_jobs = fresh.get("jobs", []) if isinstance(fresh, dict) else fresh
+        fresh_jobs, backfilled, jd_cov = backfill_missing_jd(
+            master, csv_out, run_keyword, cfg, tmp_dir, log,
+            min_coverage=cfg.get("min_jd_coverage", 0.9),
+            round_timeout=cfg.get("backfill_timeout", 600))
+        state["backfilled"] = backfilled
+        state["jd_coverage"] = round(jd_cov, 4)
+        state["jd_missing"] = sum(1 for j in fresh_jobs if j.get("has_jd") != "yes")
         state["ok_jobs"] = len(fresh_jobs)
         state["ok_jd"] = sum(1 for j in fresh_jobs if j.get("has_jd") == "yes")
+        prev_ids = {str(j.get("job_id")) for j in old_jobs if j.get("job_id")}
+        fresh_ids = {str(j.get("job_id")) for j in fresh_jobs if j.get("job_id")}
+        state["new_jobs"] = len(fresh_ids - prev_ids)
+        state["carried"] = sum(1 for j in fresh_jobs if j.get("carried") == "yes")
+        pool = {}
+        for j in fresh_jobs:
+            k = str(j.get("source_keyword") or "未标注")
+            pool[k] = pool.get(k, 0) + 1
+        state["pool_by_keyword"] = pool
+        log.append(f"并集 {state['ok_jobs']} 条（本轮新增 {state['new_jobs']}，"
+                   f"存量 {state['carried']}，兜底补抓 {state['backfilled']}）；"
+                   f"JD {state['ok_jd']} 条 / 覆盖 {state['jd_coverage']:.1%}；关键词 {run_keyword}")
+        _write_state(state_path, state)
 
         # 5. 快照 + 趋势
         log.append("[5/7] 写入快照并计算行业岗位趋势")
@@ -256,8 +379,12 @@ def refresh(cfg, state_path, logged_check=None):
             "last_ok_at": now,
             "data_version": str(int(time.time())),
             "master": master, "trends_path": trends,
+            "keyword_index": (kw_idx + 1) % len(all_keywords),
+            "next_keyword": all_keywords[(kw_idx + 1) % len(all_keywords)],
         })
-        log.append(f"完成：{state['ok_jobs']} 条岗位 / {state['ok_jd']} 条 JD")
+        log.append(f"完成：{state['ok_jobs']} 条岗位 / {state['ok_jd']} 条 JD"
+                   f"（本轮新增 {state['new_jobs']}）；"
+                   f"下一轮关键词 {state['next_keyword']}")
     except Exception as e:
         state.update({
             "status": "error", "error": str(e),
@@ -271,6 +398,8 @@ def refresh(cfg, state_path, logged_check=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--keyword", default="AI 工程师")
+    ap.add_argument("--keywords", default="",
+                    help="多关键词按轮次轮换，用 | 或 , 分隔；给了就覆盖 --keyword")
     ap.add_argument("--city", default="100010000")
     ap.add_argument("--pages", type=int, default=8)
     ap.add_argument("--cdp-port", type=int, default=9222)
@@ -285,8 +414,10 @@ def main():
 
     hist = args.history_dir or os.path.join(os.path.expanduser("~"), ".boss-zhipin-scraper", "history")
     state_path = args.state or os.path.join(hist, "refresh_state.json")
+    kw_list = [k.strip() for k in (args.keywords or "").replace("|", ",").split(",") if k.strip()]
     cfg = {
-        "keyword": args.keyword, "city": args.city, "pages": args.pages,
+        "keyword": args.keyword, "keywords": kw_list,
+        "city": args.city, "pages": args.pages,
         "cdp_port": args.cdp_port, "output_dir": args.output_dir,
         "history_dir": hist, "dashboard": args.dashboard,
         "gap_min": args.gap_min, "gap_max": args.gap_max,

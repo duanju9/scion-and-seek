@@ -2,16 +2,46 @@
 """把岗位列表与详情 JD 合并成一张完整主表（CSV + JSON）。
 
 输出字段涵盖：岗位基本信息、薪资、地点、公司信息、技能福利、JD 全文。
+
+多关键词轮换时，主表是「当轮 + 上轮余量」的并集：当轮抓到的岗位刷新 last_seen 并覆盖旧记录，
+上轮有、本轮没有的岗位按 job_id 保留（last_seen 超过 --keep-days 才丢弃），
+避免换关键词那一轮把别的新岗位整表冲掉。
 """
 import argparse
 import csv
+import datetime
 import json
 import os
+
+FIELD_ORDER = ("job_id", "title", "salary", "salary_source", "location",
+               "boss_name", "company_scale", "company_stage", "company_industry",
+               "boss_title", "boss_active_status", "job_labels", "skills",
+               "skill_tags", "welfare", "tags", "has_jd", "jd", "job_link",
+               "company_link", "source_keyword", "last_keyword",
+               "first_seen", "last_seen", "carried")
 
 
 def load_json(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def _age_days(stamp):
+    try:
+        d = datetime.datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S")
+        return (datetime.datetime.now() - d).total_seconds() / 86400.0
+    except Exception:
+        return None
+
+
+def ordered_row(row, source_keyword, carried):
+    out = {k: row.get(k, "") for k in FIELD_ORDER}
+    # source_keyword 记「首次抓到这个岗的词」，last_keyword 记「最近一次命中的词」，
+    # 这样换词轮换不会把池子构成全部改写成最后一个词
+    out["source_keyword"] = row.get("source_keyword") or source_keyword
+    out["last_keyword"] = row.get("last_keyword") or source_keyword
+    out["carried"] = carried
+    return out
 
 
 def main():
@@ -20,6 +50,12 @@ def main():
     ap.add_argument("--details", required=True)
     ap.add_argument("--out-csv", required=True)
     ap.add_argument("--out-json", required=True)
+    ap.add_argument("--source-keyword", default="",
+                    help="本轮采集用的关键词（写入每行 source_keyword）")
+    ap.add_argument("--carry-from", default="",
+                    help="上一轮主表 JSON；用于保留本轮列表之外的存量岗位")
+    ap.add_argument("--keep-days", type=float, default=7.0,
+                    help="存量岗位 last_seen 超过这么多天就丢弃")
     args = ap.parse_args()
 
     jobs_data = load_json(args.jobs)
@@ -28,58 +64,86 @@ def main():
     if isinstance(details, dict):
         details = details.get("details") or details.get("jobs") or []
 
+    keyword = args.source_keyword or (
+        jobs_data.get("keyword", "") if isinstance(jobs_data, dict) else "")
+    stamp = (jobs_data.get("scraped_at", "") if isinstance(jobs_data, dict) else "") \
+        or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    prev_jobs, prev_kw, prev_stamp = [], "", ""
+    if args.carry_from and os.path.isfile(args.carry_from):
+        prev = load_json(args.carry_from)
+        prev_jobs = prev.get("jobs", []) if isinstance(prev, dict) else prev
+        prev_kw = prev.get("keyword", "") if isinstance(prev, dict) else ""
+        prev_stamp = prev.get("scraped_at", "") if isinstance(prev, dict) else ""
+    prev_index = {str(p.get("job_id")): p for p in prev_jobs if p.get("job_id")}
+
     by_id = {}
     for d in details:
         jid = str(d.get("job_id") or "")
         if jid and d.get("jd"):
             by_id[jid] = d
 
-    rows = []
+    rows, seen = [], set()
     for j in jobs:
         jid = str(j.get("job_id") or "")
+        if jid and jid in seen:
+            continue
         d = by_id.get(jid, {})
+        old = prev_index.get(jid, {})
         row = dict(j)
         row["jd"] = d.get("jd", "")
         row["skill_tags"] = " | ".join(d.get("skill_tags") or [])
-        row["boss_active_status_detail"] = d.get("boss_active_status", "")
+        row["boss_active_status"] = d.get("boss_active_status") or row.get("boss_active_status", "")
+        row["job_labels"] = " | ".join(row.get("job_labels") or []) if isinstance(row.get("job_labels"), list) else row.get("job_labels", "")
+        row["welfare"] = " | ".join(row.get("welfare") or []) if isinstance(row.get("welfare"), list) else row.get("welfare", "")
         row["has_jd"] = "yes" if d.get("jd") else "no"
-        # 统一字段顺序
-        ordered = {
-            "job_id": row.get("job_id", ""),
-            "title": row.get("title", ""),
-            "salary": row.get("salary", ""),
-            "salary_source": row.get("salary_source", ""),
-            "location": row.get("location", ""),
-            "boss_name": row.get("boss_name", ""),
-            "company_scale": row.get("company_scale", ""),
-            "company_stage": row.get("company_stage", ""),
-            "company_industry": row.get("company_industry", ""),
-            "boss_title": row.get("boss_title", ""),
-            "boss_active_status": row.get("boss_active_status_detail") or row.get("boss_active_status", ""),
-            "job_labels": " | ".join(row.get("job_labels") or []) if isinstance(row.get("job_labels"), list) else row.get("job_labels", ""),
-            "skills": row.get("skills", ""),
-            "skill_tags": row.get("skill_tags", ""),
-            "welfare": " | ".join(row.get("welfare") or []) if isinstance(row.get("welfare"), list) else row.get("welfare", ""),
-            "tags": row.get("tags", ""),
-            "has_jd": row.get("has_jd", "no"),
-            "jd": row.get("jd", ""),
-            "job_link": row.get("job_link", ""),
-            "company_link": row.get("company_link", ""),
-        }
-        rows.append(ordered)
+        row["first_seen"] = old.get("first_seen") or stamp
+        row["last_seen"] = stamp
+        row["source_keyword"] = old.get("source_keyword") or ""
+        row["last_keyword"] = keyword
+        rows.append(ordered_row(row, keyword, "no"))
+        if jid:
+            seen.add(jid)
 
+    carried, expired = 0, 0
+    for pj in prev_jobs:
+        jid = str(pj.get("job_id") or "")
+        if not jid or jid in seen:
+            continue
+        # 老版本主表没有 last_seen，用上轮采集时间兜底，避免存量永不过期
+        seen_at = pj.get("last_seen") or pj.get("first_seen") or prev_stamp
+        age = _age_days(seen_at)
+        if age is not None and args.keep_days > 0 and age > args.keep_days:
+            expired += 1
+            continue
+        row = dict(pj)
+        row["last_seen"] = seen_at
+        rows.append(ordered_row(row, prev_kw, "yes"))
+        seen.add(jid)
+        carried += 1
+
+    meta = {
+        "keyword": keyword,
+        "city": jobs_data.get("city", "") if isinstance(jobs_data, dict) else "",
+        "scraped_at": stamp,
+        "total": len(rows),
+        "this_round": len(rows) - carried,
+        "carried": carried,
+        "expired": expired,
+    }
     with open(args.out_json, "w", encoding="utf-8") as f:
-        json.dump({"keyword": jobs_data.get("keyword", ""), "city": jobs_data.get("city", ""),
-                   "scraped_at": jobs_data.get("scraped_at", ""), "total": len(rows), "jobs": rows},
-                  f, ensure_ascii=False, indent=2)
+        json.dump(dict(meta, jobs=rows), f, ensure_ascii=False, indent=2)
 
     with open(args.out_csv, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
+        writer = csv.DictWriter(f, fieldnames=list(FIELD_ORDER))
         writer.writeheader()
         writer.writerows(rows)
 
     with_jd = sum(1 for r in rows if r["has_jd"] == "yes")
-    print(f"合并完成：{len(rows)} 条岗位，其中 {with_jd} 条带 JD，{len(rows)-with_jd} 条无 JD")
+    print(f"合并完成：{len(rows)} 条岗位（本轮 {len(rows) - carried} + 存量 {carried}），"
+          f"其中 {with_jd} 条带 JD")
+    if expired:
+        print(f"另有 {expired} 条存量岗位超过 {args.keep_days:g} 天未再出现，已丢弃")
     print(f"CSV: {args.out_csv}")
     print(f"JSON: {args.out_json}")
 

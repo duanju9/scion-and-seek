@@ -172,7 +172,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:32px}
 <header>
   <div>
     <h1><span>__TITLE__</span> · 岗位数据看板</h1>
-    <div class="sub">样本 __N__ 条 · JD 覆盖 __JD__ 条 · 采集于 __TIME__ <span class="tag">个人自用</span></div>
+    <div class="sub">样本 __N__ 条 · 关键词 __KW__ · JD 覆盖 __JD__ 条 · 采集于 __TIME__ <span class="tag">个人自用</span></div>
   </div>
   <div class="sub">项目：<a href="https://github.com/duanju9/scion-and-seek" target="_blank" rel="noopener">Scion &amp; Seek</a> · 来源：BOSS 直聘公开搜索页 · 本地采集</div>
 </header>
@@ -786,6 +786,19 @@ def main():
         data = json.load(f)
     jobs = data["jobs"] if isinstance(data, dict) and "jobs" in data else data
     title = data.get("keyword", "岗位") if isinstance(data, dict) else "岗位"
+    kw_counts = {}
+    for j in jobs:
+        k = str(j.get("source_keyword") or "").strip()
+        if k:
+            kw_counts[k] = kw_counts.get(k, 0) + 1
+    if len(kw_counts) > 1:
+        title = "AI 岗位池"
+        top = sorted(kw_counts.items(), key=lambda x: -x[1])[:5]
+        kw_summary = " / ".join(f"{k} {n}" for k, n in top)
+        if len(kw_counts) > len(top):
+            kw_summary += f" 等 {len(kw_counts)} 个词"
+    else:
+        kw_summary = next(iter(kw_counts), title)
 
     trends = {}
     if args.trends and os.path.isfile(args.trends):
@@ -798,6 +811,7 @@ def main():
                     .replace("__DATA__", payload)
                     .replace("__TITLE__", title)
                     .replace("__N__", str(len(jobs)))
+                    .replace("__KW__", kw_summary)
                     .replace("__JD__", str(sum(1 for j in jobs if j.get("has_jd") == "yes")))
                     .replace("__TIME__", data.get("scraped_at", "")[:16]
                              if isinstance(data, dict) else ""))

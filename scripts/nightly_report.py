@@ -125,11 +125,18 @@ def main():
                 skill_counter[s] += 1
     top_skills = "、".join(f"{s}（{n}）" for s, n in skill_counter.most_common(10)) or "暂无"
 
+    last_refresh = (logs[-1].get("refresh", {}) or {}) if logs else {}
+    pool = last_refresh.get("pool_by_keyword") or {}
+    pool_txt = " / ".join(f"{k} {v}" for k, v in
+                          sorted(pool.items(), key=lambda x: -x[1])[:6]) or "-"
     lines = [
         f"# 夜间巡检报告（{args.day}）", "",
         f"> 统计范围：{first} — {last}；共 {len(logs)} 轮，成功 {ok_runs} 轮。", "",
         "## 一、执行概览", "",
         f"- 巡检轮次：{len(logs)}；成功：{ok_runs}；异常：{len(logs) - ok_runs}",
+        f"- 最近一轮扩量：关键词「{last_refresh.get('keyword') or '-'}」"
+        f"新增 {last_refresh.get('new_jobs', '-')} 条，存量带过 {last_refresh.get('carried', '-')} 条",
+        f"- 岗位池按关键词：{pool_txt}",
         f"- 岗位总数（SQLite）：{db.get('jobs', 0)}；AI 相关：{db.get('ai_jobs', 0)}；含 JD：{db.get('jd_jobs', 0)}",
         f"- 覆盖公司：{db.get('companies', 0)}；快照期数：{db.get('snapshots', 0)}；最新快照：{db.get('latest_snapshot', '-')}",
         f"- 最新趋势：岗位 {latest.get('count', '-')} 条，薪资中位数 {latest.get('salary_mid', '-')}K，"

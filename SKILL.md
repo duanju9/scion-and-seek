@@ -173,10 +173,18 @@ API：`/api/status`、`/api/login`、`/api/conversations`、`/api/messages?who=`
 ```bash
 python "$S/refresh_data.py" --output-dir "<交付目录>" \
   --dashboard "<交付目录>/岗位数据看板.html" --cdp-port 9222 \
-  --keyword "AI 工程师" --city 100010000 --pages 8 --interval-minutes 30
+  --keywords "AI 工程师|AI 产品经理|解决方案工程师|售前工程师|B端产品经理" \
+  --city 100010000 --pages 8 --interval-minutes 30
 ```
 
 刷新链路（7 步，每步实时写状态）：登录态检查 → 抓列表（不带详情）→ 用上期 JD 作种子 → 只补新增 JD → 合并主表并回填缺失字段 → 写快照+算趋势 → 重生成看板+分析报告。
+
+多关键词轮换（扩量的关键）：
+
+- 关键词列表默认从 `<交付目录>/keywords.json` 读，`--keywords` 优先；`refresh_state.json` 的 `keyword_index` 记录轮换位置，每轮成功后才前移，失败不跳词。
+- 主表是**并集**：当轮列表 + 上轮余量，按 `job_id` 去重；存量岗超过 `--keep-days`（默认 7 天）没再出现才丢弃。否则换关键词那一轮会把别的词抓到的岗整表冲掉。
+- 每行带 `source_keyword`（哪个词抓到的）和 `carried`（是否本轮没出现、从存量带过来），看板标题会自动从单关键词变成「AI 岗位池 · 关键词 A 120 / B 40」。
+- 状态新增 `new_jobs`（本轮净新增）、`carried`（存量条数）、`pool_by_keyword`（按词分布）、`next_keyword`；`new_jobs` 连续两轮为 0 说明该词已抓透。
 
 - 快照目录：`~/.boss-zhipin-scraper/history/snapshot_YYYYMMDD_HHMMSS.json`，默认保留最近 60 期。
 - 趋势文件：`<交付目录>/trends.json`，同时内嵌进看板，离线也能看。

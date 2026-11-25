@@ -18,7 +18,9 @@
    - CDP 不可用：记录 `cdp_down`，继续离线检查，不要尝试重启/登录 Chrome。
 
 2. **数据刷新**
-   - 已登录且刷新未运行：检查 `last_ok_at`，超过 30 分钟则 `POST /api/refresh`，轮询 `/api/refresh/status` 最多 9 分钟。
+   - 已登录且刷新未运行：检查 `last_ok_at`，超过 30 分钟则 `POST /api/refresh`，轮询 `/api/refresh/status` 最多 15 分钟（换关键词的那轮要抓 120 条新岗的 JD，通常 10-13 分钟）。
+   - 关键词按 `<输出>/keywords.json` 轮换，每轮换一个词；`refresh_state.json` 里的 `keyword_index` 记录下一轮用哪个。要改采集范围就改 `keywords.json`，不用改命令行。
+   - 判断本轮是否真的扩量：看 `/api/refresh/status` 的 `new_jobs` 与 `pool_by_keyword`，`new_jobs=0` 连续两轮就说明该词已抓透，可以换词或加页。
    - 刷新正在运行：等待结束；不要同时触发第二次。
    - 未登录：记录 `login_required`，跳过在线采集，不扫码、不绕过验证码。
 
@@ -26,11 +28,11 @@
    - `python "<Skill>/scripts/patrol_once.py" --output-dir "<输出>" --base http://127.0.0.1:8765 --start-server`
    - 它会：落库 `jobs.db`、编译检查、API 冒烟、看板 marker 检查、更新 `简历优化建议.md`、写 `patrol/patrol_*.json` 和 `巡检日志.md`。
    - 不发送招呼、不启用/执行自动投递、不点「立即沟通」。
-
 4. **数据核查**
    - 用 sqlite3 查 `jobs.db`：岗位总数、`is_ai=1` 数、`has_jd=1` 数、最新 `snapshots.ts`。
    - 异常标准：岗位 0、JD 覆盖率 <90%、最新快照时间未递增。
-   - 先尝试重跑刷新/补抓/重建看板；修不好要记录，不要静默。
+   - JD 覆盖率跌破 90% 时，先给缺失岗位单独补抓（`fetch_missing_details.py --jobs <缺失子集> --details <已有JD种子>`），再回写主表并重建看板/趋势/落库；修不好要记录，不要静默。
+   - 主表是并集（当轮 + 上轮余量），岗位总数只增不减属正常；「岗位数变少」才要查是不是 carry 失效。
 
 5. **发现问题 -> GitHub Issue**
    - 先查是否已有同标题 open issue（脚本自动去重）。

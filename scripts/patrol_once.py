@@ -159,7 +159,8 @@ def main():
     ap.add_argument("--db", default="")
     ap.add_argument("--no-refresh", action="store_true")
     ap.add_argument("--start-server", action="store_true")
-    ap.add_argument("--max-wait-minutes", type=int, default=9)
+    ap.add_argument("--max-wait-minutes", type=int, default=15,
+                    help="多关键词轮换后单轮可能到 10-13 分钟，等待窗口放宽到 15")
     args = ap.parse_args()
     args.dashboard = args.dashboard or os.path.join(args.output_dir, "岗位数据看板.html")
     args.db = args.db or os.path.join(args.output_dir, "jobs.db")
