@@ -1,5 +1,7 @@
 # GitHub Copilot Agent Instructions
 
+Project: https://github.com/duanju9/scion-and-seek
+
 Read `AGENTS.md` first, then `README.md` and `SKILL.md`. For patrol work, read `references/nightly-patrol.md`.
 
 Ready-to-copy prompts: `prompts/universal-agent-prompt.md`.

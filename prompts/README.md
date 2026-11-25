@@ -1,5 +1,7 @@
 # 在不同 Agent 里使用
 
+项目地址：https://github.com/duanju9/scion-and-seek
+
 本目录提供可直接复制的提示词。所有 Agent 的规范源头是仓库根目录的 `AGENTS.md`，各平台入口只是薄封装，避免多份规则漂移。
 
 | Agent | 自动读取的文件 | 使用方式 |

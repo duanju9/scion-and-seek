@@ -1,5 +1,7 @@
 # 通用 Agent 提示词
 
+项目地址：https://github.com/duanju9/scion-and-seek
+
 把下面整段复制给任意支持“读写本地文件 + 执行命令”的 Agent（Claude Code、Codex、Cursor、Gemini CLI、GitHub Copilot Agent、WorkBuddy 等）。把 `<OUT>` 换成你的输出目录。
 
 ---

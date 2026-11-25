@@ -1,5 +1,7 @@
 # Gemini CLI
 
+项目地址：https://github.com/duanju9/scion-and-seek
+
 完整规范见 `AGENTS.md`；先读它，再读 `README.md`、`SKILL.md`，巡检时读 `references/nightly-patrol.md`。
 
 可直接复制的提示词见 `prompts/universal-agent-prompt.md`。

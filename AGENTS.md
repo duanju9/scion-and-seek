@@ -1,5 +1,7 @@
 # AGENTS.md
 
+项目地址：https://github.com/duanju9/scion-and-seek
+
 本文件是本仓库的通用 Agent 操作规范。Claude Code、Codex、Cursor、Gemini CLI、GitHub Copilot、WorkBuddy 等 Agent 进入仓库后先读本文件，再按任务读取 `README.md`、`SKILL.md` 和 `references/`。
 
 ## 项目是什么

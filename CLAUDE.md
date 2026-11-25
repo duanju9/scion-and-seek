@@ -1,5 +1,7 @@
 # Claude Code
 
+项目地址：https://github.com/duanju9/scion-and-seek
+
 本仓库的完整 Agent 规范在 `AGENTS.md`。开始任何任务前先读它，再读 `README.md` 和 `SKILL.md`；巡检任务再读 `references/nightly-patrol.md`。
 
 可直接复制的提示词见 `prompts/universal-agent-prompt.md`。

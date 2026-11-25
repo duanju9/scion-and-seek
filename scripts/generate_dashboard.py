@@ -174,7 +174,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:32px}
     <h1><span>__TITLE__</span> · 岗位数据看板</h1>
     <div class="sub">样本 __N__ 条 · JD 覆盖 __JD__ 条 · 采集于 __TIME__ <span class="tag">个人自用</span></div>
   </div>
-  <div class="sub">来源：BOSS 直聘公开搜索页 · 本地采集</div>
+  <div class="sub">项目：<a href="https://github.com/duanju9/scion-and-seek" target="_blank" rel="noopener">Scion &amp; Seek</a> · 来源：BOSS 直聘公开搜索页 · 本地采集</div>
 </header>
 
 <div class="loginbar" id="loginbar">
@@ -275,7 +275,8 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:32px}
   </div>
 </div>
 
-<footer>数据仅供个人求职参考 · 招聘信息以平台实时页面为准 · 点击公司/岗位标题可跳转原页面</footer>
+<footer>数据仅供个人求职参考 · 招聘信息以平台实时页面为准 · 点击公司/岗位标题可跳转原页面<br>
+项目：<a href="https://github.com/duanju9/scion-and-seek" target="_blank" rel="noopener">Scion &amp; Seek</a> · 代码公开，简历与岗位数据仅留本地</footer>
 </div>
 
 <script>
