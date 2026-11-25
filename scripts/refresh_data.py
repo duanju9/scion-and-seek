@@ -323,10 +323,19 @@ def refresh(cfg, state_path, logged_check=None):
                 log.append(f"从上期回填 {n} 个缺失字段（主要是 Boss 活跃状态）")
         fresh = _load(master, {}) or {}
         fresh_jobs = fresh.get("jobs", []) if isinstance(fresh, dict) else fresh
-        fresh_jobs, backfilled, jd_cov = backfill_missing_jd(
-            master, csv_out, run_keyword, cfg, tmp_dir, log,
-            min_coverage=cfg.get("min_jd_coverage", 0.9),
-            round_timeout=cfg.get("backfill_timeout", 600))
+        if detail_cap > 0:
+            # 上限模式下覆盖率必然暂时低于阈值，兜底再跑一轮会把单轮时间又拉长到窗口之外；
+            # 积压交给后续轮次消化，这里只记录。
+            backfilled, jd_cov = 0, jd_coverage(fresh_jobs)
+            backlog = sum(1 for j in fresh_jobs if j.get("has_jd") != "yes")
+            if backlog:
+                log.append(f"[4.5/7] 单轮上限模式：跳过兜底补抓，"
+                           f"{backlog} 条 JD 积压留待后续轮次")
+        else:
+            fresh_jobs, backfilled, jd_cov = backfill_missing_jd(
+                master, csv_out, run_keyword, cfg, tmp_dir, log,
+                min_coverage=cfg.get("min_jd_coverage", 0.9),
+                round_timeout=cfg.get("backfill_timeout", 600))
         state["backfilled"] = backfilled
         state["jd_coverage"] = round(jd_cov, 4)
         state["jd_missing"] = sum(1 for j in fresh_jobs if j.get("has_jd") != "yes")
