@@ -117,6 +117,22 @@ def upsert_jobs(conn, jobs, stamp):
     return len(rows)
 
 
+def insert_history(conn, trends):
+    """把趋势里的历史 summaries 也写入 snapshots，保持与 trends.snapshot_count 一致。"""
+    for s in (trends or {}).get("summaries", []) or []:
+        ts = str(s.get("ts") or "")[:19].replace("T", " ")
+        if not ts:
+            continue
+        conn.execute("""
+        INSERT INTO snapshots (ts,job_count,jd_count,ai_count,salary_mid,active_rate,source)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(ts) DO UPDATE SET
+          job_count=excluded.job_count, salary_mid=excluded.salary_mid,
+          active_rate=excluded.active_rate, source=excluded.source
+        """, (ts, s.get("count"), None, s.get("ai_count"),
+              s.get("salary_mid"), s.get("active_rate"), "trends"))
+
+
 def insert_snapshot(conn, data, jobs, trends, label):
     latest = (trends or {}).get("latest") or {}
     jd_count = sum(1 for j in jobs if str(j.get("jd") or "").strip())
@@ -168,6 +184,7 @@ def main():
         init_db(conn)
         stamp = now()
         n = upsert_jobs(conn, jobs, stamp)
+        insert_history(conn, trends)
         ts = insert_snapshot(conn, data, jobs, trends, args.label)
         s = summary(conn)
         conn.execute("INSERT INTO runs (run_at,kind,total,ai_count,jd_count,notes) VALUES (?,?,?,?,?,?)",
