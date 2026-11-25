@@ -40,6 +40,51 @@ def db_stats(path):
         conn.close()
 
 
+def issue_log(output_dir):
+    """读取 output/issues.jsonl，按标题聚合出最新状态。"""
+    path = os.path.join(output_dir, "issues.jsonl")
+    items = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except Exception:
+                    continue
+    return items
+
+
+ISSUE_TAG = {"created": "新建", "commented": "追加", "closed": "已关闭",
+             "close-miss": "未命中", "dry-run": "演练"}
+
+
+def issue_section(output_dir, limit=8):
+    items = issue_log(output_dir)
+    if not items:
+        return ["- 无 issue 记录：本轮未建单。"], None
+    latest = {}
+    for it in items:
+        latest[it.get("title", "")] = it
+    closed = sum(1 for i in latest.values() if i.get("action") == "closed")
+    opened = sum(1 for i in latest.values()
+                 if i.get("action") in ("created", "commented", "close-miss"))
+    failed = [i for i in items if str(i.get("action", "")).endswith("-failed")]
+    lines = [f"- Issue 台账：open {opened} / closed {closed} / 建单或评论失败 {len(failed)} 次"]
+    for title, it in list(latest.items())[-limit:]:
+        tag = ISSUE_TAG.get(it.get("action"), it.get("action") or "-")
+        url = str(it.get("url") or "")
+        link = f" — {url}" if url.startswith("http") else ""
+        lines.append(f"- [{tag}] {title}{link}")
+    if failed:
+        last = failed[-1]
+        reason = str(last.get("output") or last.get("error") or "")[:120].replace("\n", " ")
+        lines.append(f"- 最近一次失败：{last.get('at')} {reason}")
+    return lines, (closed, opened, len(failed))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-dir", required=True)
@@ -115,8 +160,10 @@ def main():
             lines.append(f"- {e}（{n} 次）")
     else:
         lines.append("- 本轮未发现阻塞性错误。")
+    lines.append("")
+    issue_lines, _issue_counts = issue_section(out)
+    lines += issue_lines
     lines += [
-        "- 已修复：登录按钮卡住（登录接口 attach 页面 + 前端无超时）、会话详情串内容（头部先变/消息后变）、趋势线归一化重叠、静态预览误当工作台。",
         "- 保留护栏：自动投递默认关闭；测试简历拒绝启用；风控/验证码立即停止。",
         "", "## 五、简历与岗位匹配", "",
         f"- 简历：{resume.get('original_name') or resume.get('source_file') or '未上传'}",
