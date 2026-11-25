@@ -290,13 +290,17 @@ def refresh(cfg, state_path, logged_check=None):
                        for j in old_jobs if j.get("jd")], f, ensure_ascii=False)
         log.append(f"[2/7] JD 种子 {sum(1 for j in old_jobs if j.get('jd'))} 条，只需补新增")
 
-        # 3. 增量补 JD
-        log.append(f"[3/7] 增量补抓 JD（间隔 {cfg['gap_min']}-{cfg['gap_max']}s）")
-        ok, _ = _run([PY, os.path.join(HERE, "fetch_missing_details.py"),
+        # 3. 增量补 JD（单轮限量：宽关键词一次能冒出 100+ 新岗，不封顶会把 30 分钟窗口吃满）
+        detail_cap = int(cfg.get("detail_limit", 80))
+        log.append(f"[3/7] 增量补抓 JD（间隔 {cfg['gap_min']}-{cfg['gap_max']}s，"
+                   f"本轮上限 {detail_cap or '不限'} 条）")
+        cmd_detail = [PY, os.path.join(HERE, "fetch_missing_details.py"),
                       "--jobs", tmp_jobs, "--details", seed_details,
                       "--output", merged_details, "--cdp-port", str(cfg["cdp_port"]),
-                      "--gap-min", str(cfg["gap_min"]), "--gap-max", str(cfg["gap_max"])],
-                     cfg.get("detail_timeout", 1200), log)
+                      "--gap-min", str(cfg["gap_min"]), "--gap-max", str(cfg["gap_max"])]
+        if detail_cap > 0:
+            cmd_detail += ["--limit", str(detail_cap)]
+        ok, _ = _run(cmd_detail, cfg.get("detail_timeout", 1200), log)
         if not ok or not os.path.isfile(merged_details):
             log.append("补抓异常，降级为仅用种子 JD 合并")
             if not os.path.isfile(merged_details):
@@ -339,7 +343,8 @@ def refresh(cfg, state_path, logged_check=None):
         state["pool_by_keyword"] = pool
         log.append(f"并集 {state['ok_jobs']} 条（本轮新增 {state['new_jobs']}，"
                    f"存量 {state['carried']}，兜底补抓 {state['backfilled']}）；"
-                   f"JD {state['ok_jd']} 条 / 覆盖 {state['jd_coverage']:.1%}；关键词 {run_keyword}")
+                   f"JD {state['ok_jd']} 条 / 覆盖 {state['jd_coverage']:.1%}"
+                   f"（积压 {state['jd_missing']} 条留待后续轮次）；关键词 {run_keyword}")
         _write_state(state_path, state)
 
         # 5. 快照 + 趋势
@@ -402,6 +407,8 @@ def main():
                     help="多关键词按轮次轮换，用 | 或 , 分隔；给了就覆盖 --keyword")
     ap.add_argument("--city", default="100010000")
     ap.add_argument("--pages", type=int, default=8)
+    ap.add_argument("--detail-limit", type=int, default=80,
+                    help="单轮最多补抓多少条 JD，0=不限；宽关键词靠它把单轮控制在刷新间隔内")
     ap.add_argument("--cdp-port", type=int, default=9222)
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--history-dir", default="")
@@ -421,6 +428,7 @@ def main():
         "cdp_port": args.cdp_port, "output_dir": args.output_dir,
         "history_dir": hist, "dashboard": args.dashboard,
         "gap_min": args.gap_min, "gap_max": args.gap_max,
+        "detail_limit": args.detail_limit,
     }
     while True:
         st = refresh(cfg, state_path)

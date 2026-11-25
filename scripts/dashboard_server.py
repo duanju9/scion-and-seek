@@ -882,6 +882,8 @@ def main():
                     help="多关键词按轮次轮换，用 | 或 , 分隔；给了就覆盖 --keyword")
     ap.add_argument("--city", default="100010000")
     ap.add_argument("--pages", type=int, default=8)
+    ap.add_argument("--detail-limit", type=int, default=80,
+                    help="单轮最多补抓多少条 JD，0=不限；宽关键词靠它把单轮控制在刷新间隔内")
     ap.add_argument("--gap-min", type=float, default=2.5)
     ap.add_argument("--gap-max", type=float, default=5)
     ap.add_argument("--resume", default="", help="parse_resume.py 产出的简历 JSON（启用自动投递必需）")
@@ -904,6 +906,7 @@ def main():
         "cdp_port": args.cdp_port, "output_dir": out_dir,
         "history_dir": hist, "dashboard": args.dashboard,
         "gap_min": args.gap_min, "gap_max": args.gap_max,
+        "detail_limit": args.detail_limit,
     }
     apply_state = os.path.join(hist, "auto_apply_state.json")
     uploaded_resume = os.path.join(out_dir, "resume.json")
