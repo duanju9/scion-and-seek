@@ -13,6 +13,8 @@ import datetime
 import json
 import os
 
+UNKNOWN_KEYWORD = "未标注"  # 历史行缺 source_keyword 时用，避免被当前词认领
+
 FIELD_ORDER = ("job_id", "title", "salary", "salary_source", "location",
                "boss_name", "company_scale", "company_stage", "company_industry",
                "boss_title", "boss_active_status", "job_labels", "skills",
@@ -99,7 +101,12 @@ def main():
         row["has_jd"] = "yes" if d.get("jd") else "no"
         row["first_seen"] = old.get("first_seen") or stamp
         row["last_seen"] = stamp
-        row["source_keyword"] = old.get("source_keyword") or ""
+        # 首次命中的岗才归到本轮词；已在主表里的行保留首次归属，
+        # 历史缺字段的行记「未标注」，不要顺手认领成本轮关键词
+        if jid and jid in prev_index:
+            row["source_keyword"] = old.get("source_keyword") or UNKNOWN_KEYWORD
+        else:
+            row["source_keyword"] = old.get("source_keyword") or keyword
         row["last_keyword"] = keyword
         rows.append(ordered_row(row, keyword, "no"))
         if jid:
@@ -118,7 +125,7 @@ def main():
             continue
         row = dict(pj)
         row["last_seen"] = seen_at
-        rows.append(ordered_row(row, prev_kw, "yes"))
+        rows.append(ordered_row(row, row.get("source_keyword") or UNKNOWN_KEYWORD, "yes"))
         seen.add(jid)
         carried += 1
 
