@@ -6,7 +6,9 @@ import datetime
 import glob
 import json
 import os
+import re
 import sqlite3
+import subprocess
 
 
 def load_json(path, default=None):
@@ -61,27 +63,89 @@ ISSUE_TAG = {"created": "新建", "commented": "追加", "closed": "已关闭",
              "close-miss": "未命中", "dry-run": "演练"}
 
 
+def norm_title(s):
+    """标题规范化：全角冒号、冒号两侧空白、连续空白、大小写统一后再比对（#18）。"""
+    t = str(s or "").replace("：", ":").replace("\u3000", " ")
+    t = re.sub(r"\s*:\s*", ":", t)
+    return " ".join(t.split()).lower()
+
+
+def issue_states(items):
+    """按标题聚合出最终状态。
+
+    closed 是终态：同一标题先关成功、之后又出现一条 close-miss（标题写法不同没找到），
+    不能把已关闭的工单翻回「未命中」。只有 close-miss、从来没有建单记录的标题属噪声，直接丢（#18）。
+    """
+    agg = {}
+    for it in items:
+        key = norm_title(it.get("title"))
+        if not key:
+            continue
+        ent = agg.setdefault(key, {"title": "", "url": "", "at": "",
+                                   "created": False, "closed": False, "failed": False})
+        act = str(it.get("action") or "")
+        if it.get("title"):
+            ent["title"] = it["title"]
+        if str(it.get("url") or "").startswith("http") and (act == "closed" or not ent["url"]):
+            ent["url"] = it["url"]
+        if act in ("created", "commented"):
+            ent["created"] = True
+            ent["at"] = it.get("at") or ent["at"]
+        elif act == "closed":
+            ent["closed"] = True
+            ent["at"] = it.get("at") or ent["at"]
+        elif act.endswith("-failed"):
+            ent["failed"] = True
+    out = {}
+    for key, ent in agg.items():
+        if ent["closed"]:
+            ent["state"] = "closed"
+        elif ent["created"]:
+            ent["state"] = "open"
+        elif ent["failed"]:
+            ent["state"] = "failed"
+        else:
+            continue  # 只有 close-miss / 演练，没有建单记录
+        out[key] = ent
+    return out
+
+
+def open_issue_count():
+    """GitHub 上真实 open 的 issue 数。台账 issues.jsonl 会被 close-miss 污染，报告里以仓库为准。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        p = subprocess.run(["gh", "issue", "list", "--state", "open", "--limit", "100",
+                            "--json", "number"], cwd=root, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        if p.returncode == 0:
+            return len(json.loads(p.stdout or "[]"))
+    except Exception:
+        pass
+    return None
+
+
 def issue_section(output_dir, limit=8):
     items = issue_log(output_dir)
     if not items:
         return ["- 无 issue 记录：本轮未建单。"], None
-    latest = {}
-    for it in items:
-        latest[it.get("title", "")] = it
-    closed = sum(1 for i in latest.values() if i.get("action") == "closed")
-    opened = sum(1 for i in latest.values()
-                 if i.get("action") in ("created", "commented", "close-miss"))
+    states = issue_states(items)
+    closed = sum(1 for e in states.values() if e["state"] == "closed")
+    opened = sum(1 for e in states.values() if e["state"] == "open")
     failed = [i for i in items if str(i.get("action", "")).endswith("-failed")]
-    lines = [f"- Issue 台账：open {opened} / closed {closed} / 建单或评论失败 {len(failed)} 次"]
-    for title, it in list(latest.items())[-limit:]:
-        tag = ISSUE_TAG.get(it.get("action"), it.get("action") or "-")
-        url = str(it.get("url") or "")
+    lines = [f"- Issue 台账（本地记录，close 落空会留痕）：建单未关 {opened} / 已关 {closed} / "
+             f"建单或评论失败 {len(failed)} 次；真实 open 数见下一条"]
+    for e in sorted(states.values(), key=lambda x: x.get("at") or "")[-limit:]:
+        tag = "已关闭" if e["state"] == "closed" else ("开放" if e["state"] == "open" else "失败")
+        url = str(e.get("url") or "")
         link = f" — {url}" if url.startswith("http") else ""
-        lines.append(f"- [{tag}] {title}{link}")
+        lines.append(f"- [{tag}] {e['title']}{link}")
     if failed:
         last = failed[-1]
         reason = str(last.get("output") or last.get("error") or "")[:120].replace("\n", " ")
         lines.append(f"- 最近一次失败：{last.get('at')} {reason}")
+    real_open = open_issue_count()
+    if real_open is not None:
+        lines.append(f"- GitHub 真实 open：{real_open} 个")
     return lines, (closed, opened, len(failed))
 
 
@@ -169,6 +233,9 @@ def main():
         lines.append("- 本轮未发现阻塞性错误。")
     lines.append("")
     issue_lines, _issue_counts = issue_section(out)
+    open_issues = open_issue_count()
+    if open_issues is not None:
+        issue_lines.append(f"- GitHub 实际 open：{open_issues} 条")
     lines += issue_lines
     lines += [
         "- 保留护栏：自动投递默认关闭；测试简历拒绝启用；风控/验证码立即停止。",
@@ -190,39 +257,110 @@ def main():
             section = advice.split("## 技能缺口")[0].strip()
         lines += ["", "## 六、简历优化摘要", "", section]
         lines += ["", "完整建议见 `output/简历优化建议.md`。"]
+    # 结论看「最近 3 轮」和「当前 open 工单」，而不是整夜全局：02:43 那种重启后自愈的瞬时错误
+    # 留在健康表里当历史即可，不该一直把结论按在“需要人工复核”上（#18）
+    tail = logs[-3:]
+    tail_ok = bool(tail) and all(x.get("status") == "ok" for x in tail)
+    open_now = open_issue_count()
+    if open_now is None:
+        open_now = (_issue_counts or (0, 0, 0))[1] if _issue_counts else 0
+    if tail_ok and not open_now:
+        verdict = f"数据链路正常：最近 {len(tail)} 轮全部 ok，GitHub 无 open 工单"
+    elif tail_ok:
+        verdict = f"数据链路正常：最近 {len(tail)} 轮全部 ok，但仍有 {open_now} 个 open 工单待推进"
+    else:
+        bad = [x.get("run_at", "-") for x in tail if x.get("status") != "ok"]
+        verdict = (f"数据链路需要复核：最近 3 轮中 {len(bad)} 轮异常"
+                   f"（{('、'.join(bad))[:60]}），open 工单 {open_now} 个")
     lines += ["", "## 七、结论", "",
-              f"- 数据链路{'正常' if len(logs) == ok_runs else '存在异常，需要人工复核'}；"
+              f"- {verdict}；整夜 {len(logs)} 轮成功 {ok_runs} 轮，"
               f"当前库内 AI 岗位 {db.get('ai_jobs', 0)} 条，JD 覆盖 {db.get('jd_jobs', 0)} 条。",
+              "- 历史异常（健康表里的 error 行）已记录，若下一轮仍复现会自动建单。",
               "- 详细优化项见 `output/优化方案_20261126.md`。"]
     report = "\n".join(lines) + "\n"
     report_path = os.path.join(out, "夜间巡检报告_20261126.md")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report)
 
-    plan = f"""# 优化方案（{args.day}）
+    # ---- 优化方案：按当晚实测数据生成，不用写死模板 ----
+    jobs_n = db.get("jobs", 0) or 0
+    jd_n = db.get("jd_jobs", 0) or 0
+    cov = (jd_n / jobs_n) if jobs_n else 0.0
+    backlog = max(0, jobs_n - jd_n)
+    rounds_needed = (backlog + 59) // 60 if backlog else 0
+    added = 0
+    for x in logs:
+        try:
+            added += int((x.get("refresh") or {}).get("new_jobs") or 0)
+        except (TypeError, ValueError):
+            pass
+    thin = sorted([f"{k}（{v}）" for k, v in pool.items() if v and v < 15])
+    top_pool = sorted(pool.items(), key=lambda kv: -kv[1])[:3]
+    failed_rounds = [x for x in logs if x.get("status") != "ok"]
 
-## P0 · 稳定性
-1. 登录态巡检：每轮先读 `/api/status`，刷新中不 attach 页面；登录失效只记录、不绕过验证码。
-2. 刷新互斥：`CDP_GATE` 串行化刷新/会话/招呼；刷新中禁止投递。
-3. 数据完整性：交付前校验 `has_jd` 覆盖率，低于 95% 自动补抓。
+    gaps = []
+    if advice:
+        seg = advice.split("## 技能缺口", 1)
+        if len(seg) > 1:
+            for line in seg[1].splitlines():
+                t = line.strip()
+                if t.startswith(("-", "*")):
+                    gaps.append(t.lstrip("-* ").split("（")[0].strip())
+                if len(gaps) >= 6:
+                    break
 
-## P1 · 数据与匹配
-1. 继续扩充 AI 岗位样本，按城市/行业分层，避免单一关键词偏差。
-2. 把岗位技能做归一化（大模型/LLM、RAG/检索增强），降低重复统计。
-3. 简历匹配增加“岗位方向”约束：当前简历偏 B 端产品/解决方案，投纯算法岗匹配度天然偏低，应增加 AI 产品/解决方案/AI 交付岗的岗位池。
-4. 每轮更新 `简历优化建议.md`，只给有证据的写法，不虚构经历。
+    p0 = []
+    if open_issues:
+        p0.append(f"关掉仍挂着的 {open_issues} 个 open issue（本轮已建单未闭环的项，逐条复现→修→回归→关闭）")
+    if cov < 0.95:
+        p0.append(f"JD 覆盖率 {cov:.1%}（{jd_n}/{jobs_n}），还差 {backlog} 条；"
+                  f"单轮上限 60 条，按当前节奏约 {rounds_needed} 轮补齐，补齐前不要报「数据完整」")
+    if failed_rounds:
+        p0.append(f"复盘 {len(failed_rounds)} 个失败轮次（{failed_rounds[0].get('run_at', '-')} 起），"
+                  f"把「等待超时仍落旧主表」这类判 ok 的路径改成显式 error")
+    p0.append("keep_days 淘汰与 carry 口径做成可观测指标（carried / expired 进快照表），"
+              "否则岗位池「只增不减」时看不出是真实扩量还是僵尸堆积")
 
-## P2 · 体验与自动化
-1. 工作台增加“最近巡检”卡片与失败重试按钮。
-2. 夜间巡检输出异常摘要，早上直接看报告。
-3. GitHub 只提交代码与文档，个人简历、岗位数据、数据库、快照全部留在本地。
+    p1 = []
+    if added <= 60:
+        p1.append(f"当晚累计新增仅 {added} 条，关键词轮换已进饱和区：同一批 8 页 × 5 词反复命中同一批岗位，"
+                  f"需换维度（新增关键词 / 提页数 / 分城市）而不是单纯加轮次")
+    if thin:
+        p1.append(f"下列关键词池子过薄，下一圈优先补：{'、'.join(thin)}")
+    if top_pool:
+        p1.append("池子结构：" + "、".join(f"{k} {v}" for k, v in top_pool) +
+                  "；投递建议应按方向分组（解决方案 / B 端产品 / AI 应用），不要混在一张榜里排序")
+    if gaps:
+        p1.append("简历缺口按岗位高频要求排序补证据（只写做过的）：" + "、".join(gaps))
+    p1.append("技能词归一化（大模型/LLM、RAG/检索增强、Agent/智能体），避免同一能力被拆成多条统计")
 
-## 验收标准
-- 每 30 分钟有一轮巡检记录，连续 2 轮无阻塞错误。
-- `jobs.db` 的 AI 岗位数、JD 覆盖数可查询，快照时间递增。
-- 看板可打开、简历栏可上传、登录按钮不再卡住。
-- 07:00 前产出 `夜间巡检报告_20261126.md` 与 `优化方案_20261126.md`。
-"""
+    p2 = []
+    p2.append("工作台加「最近巡检」卡片：本轮关键词、新增、carried、JD 覆盖、失败原因，一眼可查")
+    p2.append("看板增加「本轮新增 / 存量」两列，区分今晚真的进了新岗还是只是把旧岗又数了一遍")
+    p2.append("报告与方案每次由脚本按数据生成，禁止写死段落（本轮已把优化方案改成数据驱动）")
+
+    def _block(title, items, fallback):
+        return [f"## {title}", ""] + ([f"{i}. {t}" for i, t in enumerate(items, 1)] if items else [fallback]) + [""]
+
+    plan_lines = [f"# 优化方案（{args.day}）", "",
+                  "## 现状（截至最近一轮巡检）", "",
+                  f"- 岗位池 {jobs_n} 条 / AI 相关 {db.get('ai_jobs', 0)} 条 / 带 JD {jd_n} 条（覆盖 {cov:.1%}）",
+                  f"- 当晚 {len(logs)} 轮巡检，成功 {ok_runs} 轮；累计新增 {added} 条；最新快照 {db.get('latest_snapshot', '-')}",
+                  f"- 池子构成：" + ("、".join(f"{k} {v}" for k, v in sorted(pool.items(), key=lambda kv: -kv[1])) or "-"),
+                  ""]
+    plan_lines += _block("P0 · 正确性与完整性", p0, "无阻塞项：保持每轮 compile / API / 看板 marker 三查。")
+    plan_lines += _block("P1 · 扩量与匹配", p1, "样本已够，转入匹配质量优化。")
+    plan_lines += _block("P2 · 体验与自动化", p2, "无。")
+    plan_lines += ["## 验收标准", "",
+                   f"1. 连续 2 轮巡检 status=ok，且 checks 无 warning；当前 JD 覆盖 {cov:.1%}，"
+                   f"要求提升到 {(0.95 if cov < 0.95 else round(cov, 2)):.0%} 以上"
+                   f"（即至少 {int(jobs_n * (0.95 if cov < 0.95 else cov))} 条带 JD）。",
+                   "2. 每轮刷新 carried 与 new_jobs 均为非负整数且 carried>0（并集生效），"
+                   "快照时间严格递增。",
+                   "3. 本轮发现的 issue 全部 closed，且关闭动作由 report_issue.py --close 完成（不再手工 gh）。",
+                   "4. 看板可打开、简历栏可上传、自动投递保持 disabled；未发送任何招呼。",
+                   "5. 06:30 后产出定稿的 `夜间巡检报告_20261126.md` 与 `优化方案_20261126.md`。"]
+    plan = "\n".join(plan_lines) + "\n"
     plan_path = os.path.join(out, "优化方案_20261126.md")
     with open(plan_path, "w", encoding="utf-8") as f:
         f.write(plan)
