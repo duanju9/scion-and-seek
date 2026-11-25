@@ -12,6 +12,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -68,14 +69,48 @@ def ensure_labels():
 
 
 def list_open():
+    """列出 open issue。调用失败与「确实没有」必须分开，否则 --close 会静默落空（#15）。
+
+    返回 (issues, error)：error 为空串表示调用成功。
+    """
     p = gh(["issue", "list", "--state", "open", "--limit", "100",
             "--json", "number,title,url"])
-    if p.returncode != 0:
-        return []
-    try:
-        return json.loads(p.stdout or "[]")
-    except Exception:
-        return []
+    if p.returncode == 0:
+        try:
+            return json.loads(p.stdout or "[]"), ""
+        except Exception as e:
+            return [], f"解析 gh issue list 输出失败：{e}"
+    # gh CLI 失败（非仓库目录、GraphQL 抖动、限流）时退回 REST 再找一次
+    slug = repo_slug()
+    if slug:
+        q = gh(["api", f"repos/{slug}/issues?state=open&per_page=100"])
+        if q.returncode == 0:
+            try:
+                data = json.loads(q.stdout or "[]")
+                items = [{"number": x.get("number"), "title": x.get("title", ""),
+                          "url": x.get("html_url", "")}
+                         for x in data if isinstance(x, dict) and "pull_request" not in x]
+                return items, ""
+            except Exception as e:
+                return [], f"解析 REST issues 失败：{e}"
+        return [], ((q.stderr or "") or (p.stderr or "") or "gh issue list 失败").strip()[-300:]
+    return [], ((p.stderr or "") or "gh issue list 失败").strip()[-300:]
+
+
+def norm_title(s):
+    """标题比对前规范化：全角冒号转半角、冒号两侧空白统一、连续空白折叠、忽略大小写。
+    中文标题里「巡检：xxx」与「巡检: xxx」写法都出现过，不能靠 strip 精确比对（#15）。"""
+    t = str(s or "").replace("：", ":").replace("\u3000", " ")
+    t = re.sub(r"\s*:\s*", ":", t)
+    return " ".join(t.split()).lower()
+
+
+def find_open(issues, title):
+    want = norm_title(title)
+    for x in issues:
+        if norm_title(x.get("title", "")) == want:
+            return x
+    return None
 
 
 def repo_slug():
@@ -129,17 +164,28 @@ def main():
     args = ap.parse_args()
 
     ensure_labels()
-    issues = list_open()
-    hit = next((x for x in issues if x.get("title", "").strip() == args.title.strip()), None)
+    issues, list_err = list_open()
+    hit = find_open(issues, args.title)
     payload = {"at": now(), "title": args.title, "labels": args.labels}
+    if list_err:
+        payload["list_error"] = list_err
     if args.dry_run:
-        payload.update({"action": "dry-run", "existing": hit.get("url") if hit else ""})
+        payload.update({"action": "dry-run", "existing": hit.get("url") if hit else "",
+                        "open_count": len(issues)})
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     if args.close:
         if not hit:
-            payload.update({"action": "close-miss", "msg": "没有同标题 open issue"})
+            if list_err:
+                payload.update({"action": "close-miss",
+                                "msg": f"无法确认 open issue 列表：{list_err}",
+                                "open_count": len(issues)})
+            else:
+                titles = [x.get("title", "")[:40] for x in issues[:5]]
+                payload.update({"action": "close-miss",
+                                "msg": f"没有同标题 open issue（当前 open {len(issues)} 条）",
+                                "open_titles": titles})
         else:
             body = f"巡检回归通过，修复已合入。\n\n修复记录：{args.fixed_by or '见最近提交'}\n时间：{now()}"
             p = gh_retry(["issue", "close", str(hit["number"]), "--comment", body],
