@@ -56,6 +56,20 @@ def prior_snapshot(patrol_dir):
     return "", ""
 
 
+def health_errors(status):
+    """runbook 的 cdp_down / login_required 落成可判定的错误。
+
+    只把健康态写进 log["health"] 等于没有判定：Chrome 关掉或登录过期时本轮一条数据都采不到，
+    数据全旧却仍然 status=ok，整夜静默停摆。
+    """
+    st = status or {}
+    if not st.get("cdp"):
+        return ["cdp_down：CDP 不可用，本轮无在线采集（未尝试重启 Chrome、未尝试登录）"]
+    if not st.get("logged_in"):
+        return ["login_required：Boss 未登录，已跳过在线采集（未扫码、未绕过验证码）"]
+    return []
+
+
 def data_checks(db, prev_snapshot, backlog=0):
     """把 runbook 的三条异常标准写成可执行检查：岗位 0 / JD 覆盖 <90% / 快照未递增。
 
@@ -227,6 +241,7 @@ def main():
         else:
             status = {"cdp": False, "logged_in": False, "message": "server unreachable"}
     log["health"]["status"] = status
+    log["errors"].extend(health_errors(status))
 
     refresh_state = {}
     if not args.no_refresh:
@@ -312,6 +327,14 @@ def main():
 
     master = load_json(master_path, {})
     jobs = master.get("jobs", []) if isinstance(master, dict) else master
+    # 主表与 SQLite 条数对不上说明 ingest 漏写/主表被并发改写，落库结果不能当结论
+    master_n = len(jobs or [])
+    db_n = int((log.get("db") or {}).get("jobs") or 0)
+    log["checks"]["master_jobs"] = master_n
+    log["checks"]["db_master_delta"] = db_n - master_n if master_n else None
+    if master_n and db_n != master_n:
+        log["errors"].append(
+            f"落库 {db_n} 条与主表 {master_n} 条不一致（差值 {db_n - master_n}）：ingest 可能漏写")
     log["advice"] = resume_advice(args.output_dir, jobs)
 
     log["status"] = "error" if log["errors"] else "ok"
