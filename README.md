@@ -86,6 +86,9 @@ scripts/
   analyze_trends.py          快照与趋势
   auto_greet.py              单条/批量打招呼
   auto_apply.py              自动投递队列
+  ingest_db.py               岗位主表/快照落 SQLite
+  patrol_once.py             夜间巡检单轮（健康/刷新/落库/测试/简历建议）
+  nightly_report.py          巡检报告与优化方案
 references/
   architecture.md            架构图、刷新流程图、投递时序图
   workflow.md                参数速查与踩坑

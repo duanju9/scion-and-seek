@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""夜间巡检单轮：健康检查 -> 触发/等待刷新 -> 落库 -> 测试 -> 简历建议 -> 写日志。
+
+只做本地巡检与数据更新，**不发送招呼、不启用自动投递、不修改用户原始简历**。
+服务未启动时会尝试以常驻后台方式拉起 dashboard_server.py。
+"""
+import argparse
+import collections
+import datetime
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+from urllib.request import Request, urlopen
+
+
+def now():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def load_json(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def api(base, path, method="GET", timeout=20):
+    req = Request(base.rstrip("/") + path, method=method)
+    with urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8") or "{}")
+
+
+def parse_ts(s):
+    try:
+        return datetime.datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def wait_refresh(base, max_minutes=9):
+    deadline = time.time() + max_minutes * 60
+    last = {}
+    while time.time() < deadline:
+        try:
+            last = api(base, "/api/refresh/status")
+        except Exception as e:
+            return {"status": "unreachable", "error": str(e)}
+        if last.get("status") != "running":
+            return last
+        time.sleep(15)
+    last["wait_timeout"] = True
+    return last
+
+
+def maybe_start_server(args):
+    script = os.path.join(args.skill_dir, "scripts", "dashboard_server.py")
+    cmd = [sys.executable, script, "--port", str(args.port), "--cdp-port", str(args.cdp_port),
+           "--dashboard", args.dashboard, "--output-dir", args.output_dir,
+           "--interval-minutes", "30", "--no-browser"]
+    kwargs = {"cwd": args.skill_dir, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(cmd, **kwargs)
+        time.sleep(5)
+        return True
+    except Exception:
+        return False
+
+
+def resume_advice(output_dir, master_jobs):
+    resume = load_json(os.path.join(output_dir, "resume.json"), {})
+    targets = load_json(os.path.join(output_dir, "targets.json"), [])
+    path = os.path.join(output_dir, "简历优化建议.md")
+    if not resume:
+        text = "# 简历优化建议\n\n尚未上传简历。请在工作台 http://127.0.0.1:8765/ 上传 PDF/DOCX/TXT/MD。\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return {"has_resume": False, "path": path}
+
+    def norm(s):
+        return re.sub(r"[\s/()（）\-]+", "", str(s or "").lower())
+
+    resume_skills = {norm(s) for s in resume.get("skills", [])}
+    freq = collections.Counter()
+    for job in master_jobs:
+        raw = str(job.get("skills") or "") + "|" + str(job.get("skill_tags") or "")
+        for s in [x.strip() for x in raw.split("|") if x.strip()]:
+            freq[s] += 1
+    missing = [(s, n) for s, n in freq.most_common(40) if norm(s) not in resume_skills][:12]
+
+    lines = [
+        "# 简历优化建议（自动生成）", "",
+        f"> 生成时间：{now()}；基于 {len(master_jobs)} 个岗位、{len(targets)} 个匹配目标。",
+        "> 只给表述建议，不会修改或上传你的原始简历。", "",
+        "## 当前简历", "",
+        f"- 文件：{resume.get('original_name') or os.path.basename(str(resume.get('source_file') or ''))}",
+        f"- 年限：{resume.get('years_experience') or '未识别'}",
+        f"- 学历：{'/'.join(resume.get('education') or []) or '未识别'}",
+        f"- 技能：{', '.join(resume.get('skills', [])[:16]) or '未识别'}",
+        "", "## 技能缺口（岗位高频，简历未出现）", "",
+        "| 技能 | 岗位出现次数 | 建议 |", "| --- | --- | --- |",
+    ]
+    for s, n in missing:
+        lines.append(f"| {s} | {n} | 如果确有实践，补进技能栏并写一条项目证据；没有就不要虚构 |")
+    lines += ["", "## 简历表述建议", ""]
+    if missing:
+        lines.append(f"1. 技能栏优先补齐：{', '.join(s for s, _ in missing[:6])}；每个技能最好对应一条项目 bullet。")
+    lines.append("2. 项目 bullet 用「场景 + 动作 + 技术 + 结果」四段式，结果尽量量化（如准确率、耗时、成本）。")
+    lines.append("3. 把 JD 里的原词（如 RAG、Agent、模型微调、向量检索）自然嵌入项目描述，避免只写“熟悉 AI”。")
+    lines.append("4. 工作经历按「业务问题 → 你的方案 → 技术栈 → 指标」重写，删掉无证据的形容词。")
+    lines.append("5. 针对不同岗位保留一版主简历 + 一版关键词微调版，不要一份简历投所有方向。")
+
+    lines += ["", "## 匹配 Top 岗位", ""]
+    if targets:
+        for i, t in enumerate(targets[:5], 1):
+            lines.append(f"{i}. {t.get('title')} — {t.get('recipient')}（{t.get('salary')}，匹配 {t.get('score')} 分）")
+    else:
+        lines.append("暂无 targets.json；刷新岗位后在“简历”栏点“重新匹配”。")
+    lines += ["", "## 关键词对齐", "",
+              "把下列词与你的真实经历对照，能在项目里找到证据的写进简历，找不到的不要硬塞：", "",
+              "、".join(s for s, _ in missing[:10]) or "暂无"]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return {"has_resume": True, "path": path, "missing": [s for s, _ in missing[:10]],
+            "targets": len(targets)}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--base", default="http://127.0.0.1:8765")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--cdp-port", type=int, default=9222)
+    ap.add_argument("--output-dir", required=True)
+    ap.add_argument("--skill-dir", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ap.add_argument("--dashboard", default="")
+    ap.add_argument("--db", default="")
+    ap.add_argument("--no-refresh", action="store_true")
+    ap.add_argument("--start-server", action="store_true")
+    ap.add_argument("--max-wait-minutes", type=int, default=9)
+    args = ap.parse_args()
+    args.dashboard = args.dashboard or os.path.join(args.output_dir, "岗位数据看板.html")
+    args.db = args.db or os.path.join(args.output_dir, "jobs.db")
+
+    stamp = now()
+    log = {"run_at": stamp, "health": {}, "refresh": {}, "db": {},
+           "api": {}, "tests": {}, "advice": {}, "errors": []}
+
+    try:
+        status = api(args.base, "/api/status", timeout=15)
+    except Exception as e:
+        log["errors"].append(f"server unreachable: {e}")
+        if args.start_server and maybe_start_server(args):
+            try:
+                status = api(args.base, "/api/status", timeout=15)
+            except Exception as e2:
+                status = {"cdp": False, "logged_in": False, "message": str(e2)}
+        else:
+            status = {"cdp": False, "logged_in": False, "message": "server unreachable"}
+    log["health"]["status"] = status
+
+    refresh_state = {}
+    if not args.no_refresh:
+        try:
+            refresh_state = api(args.base, "/api/refresh/status", timeout=15)
+            if refresh_state.get("status") == "running":
+                refresh_state = wait_refresh(args.base, args.max_wait_minutes)
+            elif status.get("logged_in"):
+                last = parse_ts(refresh_state.get("last_ok_at"))
+                due = last is None or (datetime.datetime.now() - last).total_seconds() >= 30 * 60
+                if due:
+                    api(args.base, "/api/refresh", method="POST", timeout=20)
+                    time.sleep(1)
+                    refresh_state = wait_refresh(args.base, args.max_wait_minutes)
+        except Exception as e:
+            log["errors"].append(f"refresh failed: {e}")
+            refresh_state = {"status": "error", "error": str(e)}
+    log["refresh"] = refresh_state
+
+    # 落库
+    master_path = os.path.join(args.output_dir, "岗位公司信息_含JD.json")
+    trends_path = os.path.join(args.output_dir, "trends.json")
+    try:
+        script = os.path.join(args.skill_dir, "scripts", "ingest_db.py")
+        p = subprocess.run([sys.executable, script, "--input", master_path, "--db", args.db,
+                            "--trends", trends_path, "--label", "patrol"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=120)
+        if p.returncode == 0:
+            log["db"] = json.loads(p.stdout)
+        else:
+            log["errors"].append(f"ingest_db: {(p.stderr or p.stdout)[-300:]}")
+    except Exception as e:
+        log["errors"].append(f"ingest_db exception: {e}")
+
+    # API 冒烟
+    for path in ("/api/jobs", "/api/trends", "/api/resume/status", "/api/auto-apply/status"):
+        try:
+            data = api(args.base, path, timeout=20)
+            log["api"][path] = "ok" if isinstance(data, (dict, list)) else "empty"
+        except Exception as e:
+            log["api"][path] = f"error: {e}"
+            log["errors"].append(f"api {path}: {e}")
+
+    # 编译 + 看板静态检查
+    try:
+        p = subprocess.run([sys.executable, "-m", "compileall", "-q",
+                            os.path.join(args.skill_dir, "scripts")],
+                           capture_output=True, text=True, timeout=120)
+        log["tests"]["compile"] = "ok" if p.returncode == 0 else (p.stderr or p.stdout)[-300:]
+        if p.returncode != 0:
+            log["errors"].append("compile failed")
+    except Exception as e:
+        log["tests"]["compile"] = f"error: {e}"
+    try:
+        html = open(args.dashboard, encoding="utf-8").read()
+        markers = ["trendgrid", "btnResumeUpload", "applybar", "AbortController"]
+        log["tests"]["dashboard"] = {
+            "size": len(html), "markers": {m: m in html for m in markers}}
+        if not all(m in html for m in markers):
+            log["errors"].append("dashboard markers missing")
+    except Exception as e:
+        log["tests"]["dashboard"] = f"error: {e}"
+        log["errors"].append(f"dashboard: {e}")
+
+    master = load_json(master_path, {})
+    jobs = master.get("jobs", []) if isinstance(master, dict) else master
+    log["advice"] = resume_advice(args.output_dir, jobs)
+
+    log["status"] = "error" if log["errors"] else "ok"
+    patrol_dir = os.path.join(args.output_dir, "patrol")
+    os.makedirs(patrol_dir, exist_ok=True)
+    fn = os.path.join(patrol_dir, "patrol_" + stamp.replace(":", "").replace(" ", "_") + ".json")
+    with open(fn, "w", encoding="utf-8") as f:
+        json.dump(log, f, ensure_ascii=False, indent=2)
+
+    journal = os.path.join(args.output_dir, "巡检日志.md")
+    first = not os.path.exists(journal)
+    with open(journal, "a", encoding="utf-8") as f:
+        if first:
+            f.write("# 夜间巡检日志\n\n")
+            f.write("| 时间 | 健康 | 刷新 | 岗位 | AI 岗位 | JD | 错误 |\n")
+            f.write("| --- | --- | --- | --- | --- | --- | --- |\n")
+        db = log.get("db", {})
+        err = "；".join(log["errors"])[:160].replace("|", "/") or "-"
+        f.write(f"| {stamp} | {log['status']} | {log['refresh'].get('status','-')} | "
+                f"{db.get('jobs','-')} | {db.get('ai_jobs','-')} | {db.get('jd_jobs','-')} | {err} |\n")
+    log["log_path"] = fn
+    print(json.dumps(log, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

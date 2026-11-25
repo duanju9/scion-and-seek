@@ -104,6 +104,13 @@ auto_apply.py     (--targets targets.json | --resume resume.json --jobs 主表.j
                   --state auto_apply_state.json [--top 10 --limit 3]
                   [--gap-min 8 --gap-max 15] [--send-resume] [--dry-run]
                   dry-run 仅核对岗位页，不点沟通/不发消息；去重表按 job_id 落盘
+ingest_db.py      --input 主表.json --db jobs.db [--trends trends.json] [--label patrol]
+                  按 job_id upsert jobs，写 snapshots/runs，输出总数/AI 岗位/JD 覆盖
+patrol_once.py    --output-dir 交付目录 [--base http://127.0.0.1:8765]
+                  [--start-server] [--no-refresh] [--max-wait-minutes 9]
+                  单轮巡检；不发送招呼/不投递/不修改原始简历
+nightly_report.py --output-dir 交付目录 [--db jobs.db]
+                  汇总巡检日志/DB/趋势，生成报告与优化方案
 ```
 
 简历 JSON 字段：`skills`、`years_experience`、`education`、`target_roles`、`contact`、`sections`、`raw_text`。扫描件 PDF 无文本层，需先 OCR 再解析。

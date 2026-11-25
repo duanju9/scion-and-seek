@@ -197,6 +197,20 @@ python "$S/refresh_data.py" --output-dir "<交付目录>" \
 
 架构图、刷新流程图与自动投递时序图见 `references/architecture.md`。
 
+### 可选：夜间巡检与数据落库
+
+长时间无人值守时，用巡检脚本代替人工盯盘：
+
+```bash
+python "$S/patrol_once.py" --output-dir "<交付目录>" --base http://127.0.0.1:8765 \
+  --start-server --max-wait-minutes 9
+python "$S/ingest_db.py" --input "<交付目录>/岗位公司信息_含JD.json" \
+  --db "<交付目录>/jobs.db" --trends "<交付目录>/trends.json" --label patrol
+python "$S/nightly_report.py" --output-dir "<交付目录>"
+```
+
+`patrol_once.py` 只做健康检查、等待/触发刷新、落库、编译与看板静态检查、更新 `简历优化建议.md`，**不发送招呼、不启用自动投递、不修改原始简历**。服务未启动时可加 `--start-server` 尝试拉起；登录失效只记录，不绕过验证码。`nightly_report.py` 汇总 `patrol/patrol_*.json`、`jobs.db` 与趋势，输出 `夜间巡检报告_*.md` 和 `优化方案_*.md`。
+
 ### 可选：自动打招呼
 
 按用户要求向目标岗位发送招呼语，支持单条与批量（个人自用）。

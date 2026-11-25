@@ -33,6 +33,7 @@ SKILL_DICT = [
 ]
 EDU_WORDS = ["博士", "硕士", "研究生", "本科", "大专", "专科", "高中", "中专", "学历不限"]
 EXP_PATTERNS = [
+    r"(\d+(?:\.\d+)?)\s*年[^。；\n]{0,20}?经验",
     r"(\d+(?:\.\d+)?)\s*年(?:以上)?(?:相关|工作|开发|算法|项目|从业)?经验",
     r"工作\s*(\d+)\s*年",
     r"(\d+)\s*年以上",
@@ -129,7 +130,7 @@ def extract_years(text):
     if m:
         work_text = text[:m.start()]
     inferred = []
-    for m in re.finditer(r"(20\d{2})[./年-]\d{1,2}\s*[-~至到]\s*(20\d{2}|至今|现在)", work_text):
+    for m in re.finditer(r"(20\d{2})[./年-]\d{1,2}\s*[-~—–至到]\s*(20\d{2}|至今|现在)", work_text):
         start = int(m.group(1))
         end = 2026 if m.group(2) in ("至今", "现在") else int(m.group(2))
         if 2000 <= start <= end <= 2027:
@@ -167,12 +168,21 @@ def extract_target(text):
     """推断求职方向：优先出现频次高的岗位关键词。"""
     targets = ["AI工程师", "算法工程师", "机器学习工程师", "深度学习工程师", "大模型工程师",
                "数据分析师", "数据工程师", "后端工程师", "Java工程师", "前端工程师",
-               "产品经理", "运营", "测试工程师", "自动化", "嵌入式", "视觉算法工程师"]
+               "AI产品经理", "产品经理", "解决方案", "售前工程师",
+               "运营", "测试工程师", "自动化", "嵌入式", "视觉算法工程师"]
     low = text.lower()
     scored = [(t, low.count(t.lower())) for t in targets]
+    if re.search(r"B\s*端产品", text):
+        scored.append(("B端产品经理", 2))
     scored = [(t, n) for t, n in scored if n > 0]
     scored.sort(key=lambda x: -x[1])
-    return [t for t, _ in scored[:3]]
+    out = []
+    for t, _ in scored:
+        # 有“B端产品经理”时不再重复保留泛化的“产品经理”
+        if t == "产品经理" and any(x[0] == "B端产品经理" for x in scored):
+            continue
+        out.append(t)
+    return out[:3]
 
 
 def extract_contact(text):
