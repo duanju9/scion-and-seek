@@ -18,7 +18,8 @@
    - CDP 不可用：记录 `cdp_down`，继续离线检查，不要尝试重启/登录 Chrome。
 
 2. **数据刷新**
-   - 已登录且刷新未运行：检查 `last_ok_at`，超过 30 分钟则 `POST /api/refresh`，轮询 `/api/refresh/status` 最多 15 分钟（换关键词的那轮要抓 120 条新岗的 JD，通常 10-13 分钟）。
+   - 已登录且刷新未运行：检查 `last_ok_at`，超过 30 分钟则 `POST /api/refresh`，轮询 `/api/refresh/status` 最多 20 分钟。单轮耗时构成：列表 8 页约 4 分钟 + 明细补抓 60 条约 13 分钟，实测 13–17 分钟属正常。
+   - 等待超时（`wait_timeout`）不再是「默默用旧主表落库」：`patrol_once` 会把超时写进 errors 并判该轮 error，看到这条要当作真异常处理，下一轮重试。
    - 关键词按 `<输出>/keywords.json` 轮换，每轮换一个词；`refresh_state.json` 里的 `keyword_index` 记录下一轮用哪个。要改采集范围就改 `keywords.json`，不用改命令行。
    - 判断本轮是否真的扩量：看 `/api/refresh/status` 的 `new_jobs` 与 `pool_by_keyword`，`new_jobs=0` 连续两轮就说明该词已抓透，可以换词或加页。
    - 刷新正在运行：等待结束；不要同时触发第二次。
