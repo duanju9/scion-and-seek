@@ -529,10 +529,13 @@ class NetworkJoblistCapture:
     Network 事件已自动入缓冲，wait_next_response() 再补充等待窗口。
     """
 
-    def __init__(self, cdp, sid):
+    def __init__(self, cdp, sid, expect_keyword=""):
         self.cdp = cdp
         self.sid = sid
         self._consumed = set()   # 已返回给调用方的 requestId
+        # 换关键词时页面重新加载需要几秒，这段时间旧文档仍在响应滚动、
+        # 继续发上一关键词的 joblist 请求。不校验 query 就会把旧词结果当新词入库（#10）。
+        self.expect_keyword = (expect_keyword or "").strip()
 
     def enable(self):
         self.cdp.send("Network.enable", {}, self.sid)
@@ -545,14 +548,41 @@ class NetworkJoblistCapture:
             method = ev.get("method", "")
             params = ev.get("params", {})
             if method == "Network.requestWillBeSent":
-                if self._is_joblist_url(params.get("request", {}).get("url", "")):
-                    requests[params.get("requestId")] = True
+                url = params.get("request", {}).get("url", "")
+                if self._is_joblist_url(url):
+                    requests[params.get("requestId")] = url
             elif method == "Network.loadingFinished":
                 finished.add(params.get("requestId"))
-        for request_id in requests:
+        for request_id, url in requests.items():
             if request_id in finished and request_id not in self._consumed:
+                if not self._matches_keyword(url):
+                    # 串词响应：直接标记消费并丢弃，继续等本轮关键词的结果
+                    self._consumed.add(request_id)
+                    log.debug("丢弃非本轮关键词的列表响应: %s", url[:160])
+                    continue
                 return request_id
         return None
+
+    def _matches_keyword(self, url):
+        """列表请求的 query 是否等于本轮关键词。
+
+        没指定关键词时不做限制；指定了但请求没带 query（例如推荐流）也不收，
+        宁可本轮少抓，也不把别的词的结果算到当前词头上。
+        """
+        if not self.expect_keyword:
+            return True
+        try:
+            pairs = parse_qsl(urlparse(url).query, keep_blank_values=True)
+        except Exception:
+            return True
+        query = ""
+        for key, value in pairs:
+            if key in ("query", "keyword"):
+                query = (value or "").strip()
+                break
+        if not query:
+            return False
+        return query.replace(" ", "") == self.expect_keyword.replace(" ", "")
 
     @staticmethod
     def _is_joblist_url(url):
@@ -1909,7 +1939,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     try:
         # capture 的创建与 enable 放进 try 内：CDP 传输层异常走统一的优雅退出，
         # 原先 enable 位于 try 外，任何异常都会裸崩且跳过 finally 清理（#78）
-        capture = NetworkJoblistCapture(cdp, sid)
+        capture = NetworkJoblistCapture(cdp, sid, expect_keyword=keyword)
         capture.enable()
         for pg in range(1, max_pages + 1):
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
