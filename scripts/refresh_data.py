@@ -187,6 +187,57 @@ def _logged_in(cdp_port):
         return False, f"CDP 连接失败：{e}"
 
 
+def _lock_age(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        started = datetime.datetime.strptime(str(data.get("at", ""))[:19], "%Y-%m-%d %H:%M:%S")
+        return (datetime.datetime.now() - started).total_seconds()
+    except Exception:
+        try:
+            return time.time() - os.path.getmtime(path)
+        except Exception:
+            return 0
+
+
+def acquire_lock(hist_dir, stale_seconds=45 * 60):
+    """跨进程刷新锁。
+
+    多个工作台/巡检进程共用一个 Chrome CDP 时，会同时抓列表、互相串页、
+    把对方的标签页挤掉（实测出现 13 个残留页）。这里用文件锁把刷新串行化，
+    持锁进程的 pid 写进锁文件，超过 stale_seconds 视为死锁可抢占。
+    """
+    os.makedirs(hist_dir, exist_ok=True)
+    path = os.path.join(hist_dir, "refresh.lock")
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"pid": os.getpid(),
+                           "at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                          f, ensure_ascii=False)
+            return path
+        except FileExistsError:
+            age = _lock_age(path)
+            if age > stale_seconds:
+                try:
+                    os.replace(path, path + ".stale")
+                except Exception:
+                    pass
+                continue
+            return None
+    return None
+
+
+def release_lock(path):
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+
+
 def load_keywords(cfg):
     """关键词来源优先级：命令行 --keywords > output/keywords.json > --keyword。
 
@@ -236,6 +287,25 @@ def refresh(cfg, state_path, logged_check=None):
     log = _Logger(state, state_path)
     _write_state(state_path, state)
 
+    out_dir = cfg["output_dir"]
+    hist_dir = cfg["history_dir"]
+    lock_path = acquire_lock(hist_dir)
+    if not lock_path:
+        state.update({"status": "skipped", "ok_jobs": state.get("ok_jobs", 0),
+                      "finished_at": now,
+                      "msg": "另一进程正在刷新（refresh.lock 被占用），本轮跳过"})
+        log.append("已有刷新在跑（refresh.lock），本轮跳过，不重复占用浏览器")
+        _write_state(state_path, state)
+        return state
+    try:
+        return _refresh_locked(cfg, state_path, state, log, now, run_keyword,
+                               all_keywords, kw_idx)
+    finally:
+        release_lock(lock_path)
+
+
+def _refresh_locked(cfg, state_path, state, log, now, run_keyword, all_keywords, kw_idx):
+    """持锁执行真正的刷新流程。"""
     out_dir = cfg["output_dir"]
     hist_dir = cfg["history_dir"]
     tmp_dir = os.path.join(hist_dir, "_work")
