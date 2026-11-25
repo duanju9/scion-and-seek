@@ -82,7 +82,8 @@ def issue_states(items):
         if not key:
             continue
         ent = agg.setdefault(key, {"title": "", "url": "", "at": "",
-                                   "created": False, "closed": False, "failed": False})
+                                   "created": False, "closed": False,
+                                   "miss": False, "failed": False})
         act = str(it.get("action") or "")
         if it.get("title"):
             ent["title"] = it["title"]
@@ -94,12 +95,17 @@ def issue_states(items):
         elif act == "closed":
             ent["closed"] = True
             ent["at"] = it.get("at") or ent["at"]
+        elif act == "close-miss":
+            # --close 只找「同标题的 open issue」；没找到说明这个标题下已经没有 open 的了
+            ent["miss"] = True
         elif act.endswith("-failed"):
             ent["failed"] = True
     out = {}
     for key, ent in agg.items():
         if ent["closed"]:
             ent["state"] = "closed"
+        elif ent["created"] and ent["miss"]:
+            ent["state"] = "closed-miss"
         elif ent["created"]:
             ent["state"] = "open"
         elif ent["failed"]:
@@ -129,13 +135,14 @@ def issue_section(output_dir, limit=8):
     if not items:
         return ["- 无 issue 记录：本轮未建单。"], None
     states = issue_states(items)
-    closed = sum(1 for e in states.values() if e["state"] == "closed")
+    closed = sum(1 for e in states.values() if e["state"].startswith("closed"))
     opened = sum(1 for e in states.values() if e["state"] == "open")
     failed = [i for i in items if str(i.get("action", "")).endswith("-failed")]
     lines = [f"- Issue 台账（本地记录，close 落空会留痕）：建单未关 {opened} / 已关 {closed} / "
-             f"建单或评论失败 {len(failed)} 次；真实 open 数见下一条"]
+             f"建单或评论失败 {len(failed)} 次；GitHub 实际 open 见下一条"]
     for e in sorted(states.values(), key=lambda x: x.get("at") or "")[-limit:]:
-        tag = "已关闭" if e["state"] == "closed" else ("开放" if e["state"] == "open" else "失败")
+        tag = {"closed": "已关闭", "closed-miss": "已关闭（close 未命中）",
+               "open": "开放", "failed": "失败"}.get(e["state"], e["state"])
         url = str(e.get("url") or "")
         link = f" — {url}" if url.startswith("http") else ""
         lines.append(f"- [{tag}] {e['title']}{link}")
@@ -143,9 +150,6 @@ def issue_section(output_dir, limit=8):
         last = failed[-1]
         reason = str(last.get("output") or last.get("error") or "")[:120].replace("\n", " ")
         lines.append(f"- 最近一次失败：{last.get('at')} {reason}")
-    real_open = open_issue_count()
-    if real_open is not None:
-        lines.append(f"- GitHub 真实 open：{real_open} 个")
     return lines, (closed, opened, len(failed))
 
 
