@@ -29,11 +29,20 @@ def load_json(path):
 
 
 def _age_days(stamp):
-    try:
-        d = datetime.datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S")
-        return (datetime.datetime.now() - d).total_seconds() / 86400.0
-    except Exception:
+    """距今天数。主表里时间戳有空格格式也有 ISO 'T'（带毫秒）两种写法，
+    只认一种会让 keep_days 淘汰静默失效（#14）。"""
+    s = str(stamp or "").strip()
+    if not s:
         return None
+    for cand in (s, s[:26], s[:19]):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                d = datetime.datetime.strptime(cand, fmt)
+            except Exception:
+                continue
+            return (datetime.datetime.now() - d).total_seconds() / 86400.0
+    return None
 
 
 def ordered_row(row, source_keyword, carried):
@@ -125,6 +134,19 @@ def main():
             continue
         row = dict(pj)
         row["last_seen"] = seen_at
+        # 存量岗位的 JD 可能在这一轮被积压补抓补上，合并时不能丢（#14）
+        d = by_id.get(jid, {})
+        if d:
+            if d.get("jd") and not row.get("jd"):
+                row["jd"] = d["jd"]
+                row["has_jd"] = "yes"
+            if d.get("skill_tags") and not row.get("skill_tags"):
+                tags = d.get("skill_tags") or []
+                row["skill_tags"] = " | ".join(tags) if isinstance(tags, list) else tags
+            if d.get("boss_active_status") and not row.get("boss_active_status"):
+                row["boss_active_status"] = d["boss_active_status"]
+        if row.get("jd"):
+            row["has_jd"] = "yes"
         rows.append(ordered_row(row, row.get("source_keyword") or UNKNOWN_KEYWORD, "yes"))
         seen.add(jid)
         carried += 1

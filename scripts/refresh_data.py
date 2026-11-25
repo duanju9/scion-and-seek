@@ -337,6 +337,14 @@ def _refresh_locked(cfg, state_path, state, log, now, run_keyword, all_keywords,
             raise RuntimeError("专用浏览器未登录，请先在工作台完成登录；不启动采集")
 
         # 1. 列表（不抓详情，快）
+        # boss_cdp_raw 的 flush_jobs 是追加写，跨轮复用同一个文件会把前几轮的存量也带进
+        # 「当轮列表」：merge 见到所有 job_id 都命中本轮分支，last_seen 被整表刷成 now、
+        # carried 恒为 0、keep_days 过期永不触发（#14）。每轮开跑前清掉，只留本轮结果。
+        try:
+            if os.path.isfile(tmp_jobs):
+                os.remove(tmp_jobs)
+        except OSError as e:
+            log.append(f"清理上轮列表失败（忽略）：{e}")
         log.append(f"[1/7] 采集列表：关键词={run_keyword}"
                    f"（第 {kw_idx + 1}/{len(all_keywords)} 个）城市={cfg['city']} 页数={cfg['pages']}")
         ok, _ = _run([PY, os.path.join(HERE, "boss_cdp_raw.py"),
@@ -361,12 +369,33 @@ def _refresh_locked(cfg, state_path, state, log, now, run_keyword, all_keywords,
                        for j in old_jobs if j.get("jd")], f, ensure_ascii=False)
         log.append(f"[2/7] JD 种子 {sum(1 for j in old_jobs if j.get('jd'))} 条，只需补新增")
 
+        # 2.5 补抓清单 = 本轮列表 + 主表里仍缺 JD 的存量。
+        # 列表文件改成每轮干净后，存量岗位不会再混进「当轮列表」，积压 JD 要单独拼进来才不会饿死（#14）。
+        detail_jobs = tmp_jobs
+        round_ids = {str(j.get("job_id") or "") for j in jobs}
+        backlog = [j for j in old_jobs
+                   if str(j.get("job_id") or "") not in round_ids
+                   and j.get("has_jd") != "yes" and j.get("job_link")]
+        if backlog:
+            # 积压与本轮交替排：只把本轮排前面，上限模式下存量 JD 会被永远挤在队列尾部饿死
+            mixed, b, f = [], list(backlog), list(jobs)
+            while b or f:
+                if b:
+                    mixed.append(b.pop(0))
+                if f:
+                    mixed.append(f.pop(0))
+            backlog_jobs = os.path.join(tmp_dir, "backlog_jobs.json")
+            with open(backlog_jobs, "w", encoding="utf-8") as fh:
+                json.dump({"jobs": mixed}, fh, ensure_ascii=False, indent=2)
+            detail_jobs = backlog_jobs
+            log.append(f"[2.5/7] 补抓清单：本轮 {len(jobs)} 条 + 存量缺 JD {len(backlog)} 条（交替排序）")
+
         # 3. 增量补 JD（单轮限量：宽关键词一次能冒出 100+ 新岗，不封顶会把 30 分钟窗口吃满）
         detail_cap = int(cfg.get("detail_limit", 80))
         log.append(f"[3/7] 增量补抓 JD（间隔 {cfg['gap_min']}-{cfg['gap_max']}s，"
                    f"本轮上限 {detail_cap or '不限'} 条）")
         cmd_detail = [PY, os.path.join(HERE, "fetch_missing_details.py"),
-                      "--jobs", tmp_jobs, "--details", seed_details,
+                      "--jobs", detail_jobs, "--details", seed_details,
                       "--output", merged_details, "--cdp-port", str(cfg["cdp_port"]),
                       "--gap-min", str(cfg["gap_min"]), "--gap-max", str(cfg["gap_max"])]
         if detail_cap > 0:
