@@ -87,7 +87,7 @@ def data_checks(db, prev_snapshot, backlog=0):
     return out
 
 
-def wait_refresh(base, max_minutes=9):
+def wait_refresh(base, max_minutes=20):
     deadline = time.time() + max_minutes * 60
     last = {}
     while time.time() < deadline:
@@ -204,8 +204,9 @@ def main():
     ap.add_argument("--db", default="")
     ap.add_argument("--no-refresh", action="store_true")
     ap.add_argument("--start-server", action="store_true")
-    ap.add_argument("--max-wait-minutes", type=int, default=15,
-                    help="多关键词轮换后单轮可能到 10-13 分钟，等待窗口放宽到 15")
+    ap.add_argument("--max-wait-minutes", type=int, default=20,
+                    help="多关键词轮换后单轮实测 13-17 分钟（列表 4 分钟 + 明细 60 条约 13 分钟），"
+                         "等待窗口给到 20 分钟，避免把还在跑的刷新误判成结束")
     args = ap.parse_args()
     args.dashboard = args.dashboard or os.path.join(args.output_dir, "岗位数据看板.html")
     args.db = args.db or os.path.join(args.output_dir, "jobs.db")
@@ -244,6 +245,11 @@ def main():
             log["errors"].append(f"refresh failed: {e}")
             refresh_state = {"status": "error", "error": str(e)}
     log["refresh"] = refresh_state
+    # 超时还对着旧主表落库，等于把上一轮的数据当成这一轮的结论，必须显式记错（runbook 的异常要留痕）
+    if refresh_state.get("wait_timeout"):
+        log["errors"].append(
+            f"refresh 等待超时（>{args.max_wait_minutes} 分钟仍在 running，"
+            f"started_at={refresh_state.get('started_at', '')}），本轮落库可能仍是旧主表")
 
     # 落库
     master_path = os.path.join(args.output_dir, "岗位公司信息_含JD.json")

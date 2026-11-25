@@ -96,12 +96,16 @@ def upsert_jobs(conn, jobs, stamp):
         if not jid:
             continue
         jd = str(j.get("jd") or "")
+        # 主表里的 first_seen 是岗位首次出现、last_seen 是最近一次真正命中；
+        # 用落库时间顶替会让 DB 每轮看都像全表新岗（#16），只有缺字段才退回 stamp。
+        first_seen = str(j.get("first_seen") or stamp)[:19].replace("T", " ")
+        last_seen = str(j.get("last_seen") or stamp)[:19].replace("T", " ")
         rows.append((
             jid, j.get("title"), j.get("salary"), salary_mid(j.get("salary")),
             j.get("location"), j.get("boss_name"), j.get("company_industry"),
             j.get("company_scale"), j.get("skills") or j.get("skill_tags"),
             jd, j.get("job_link"), 1 if jd.strip() else 0, is_ai(j),
-            stamp, stamp,
+            first_seen, last_seen,
         ))
     conn.executemany("""
     INSERT INTO jobs (job_id,title,salary,salary_mid,location,company,industry,scale,
@@ -112,6 +116,7 @@ def upsert_jobs(conn, jobs, stamp):
       location=excluded.location, company=excluded.company, industry=excluded.industry,
       scale=excluded.scale, skills=excluded.skills, jd=excluded.jd,
       job_link=excluded.job_link, has_jd=excluded.has_jd, is_ai=excluded.is_ai,
+      first_seen=MIN(first_seen, excluded.first_seen),
       last_seen=excluded.last_seen
     """, rows)
     return len(rows)
