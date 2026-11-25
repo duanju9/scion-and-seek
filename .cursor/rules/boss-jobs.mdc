@@ -1,0 +1,19 @@
+---
+description: BOSS 直聘岗位研究工作台的操作规范
+globs: ["scripts/**", "references/**", "*.md"]
+alwaysApply: true
+---
+
+# BOSS 岗位工作台
+
+开始任务前先读仓库根目录的 `AGENTS.md`、`README.md`、`SKILL.md`；巡检任务读 `references/nightly-patrol.md`。
+
+可直接复制的提示词：`prompts/universal-agent-prompt.md`。
+
+执行时保持这些边界：
+
+- 只让用户本人在专用 Chrome 中登录；不索取密码、Cookie、token。
+- 不绕过验证码/风控；遇到 code 31/37 立即停止。
+- 自动投递默认关闭；不发送招呼、不点“立即沟通”，除非用户本轮明确要求。
+- 不把 `output/`、`resume.json`、`targets.json`、`jobs.db`、patrol 日志、截图、state 提交到 Git。
+- 发现问题先复现，再用 `scripts/report_issue.py` 建 Issue；修复、测试、commit/push 后关闭 Issue。

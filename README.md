@@ -15,6 +15,28 @@
 - **自动投递（可选）**：按 `job_id` 去重、随机间隔、发送前后校验收件人；测试简历拒绝启用；遇风控立即停止。
 - **趋势修正**：四个指标各自独立纵轴的分面小图，避免不同量纲归一后线条重合误读。
 
+## 用 Agent 直接启动
+
+仓库已经为不同 Agent 准备好入口，复制提示词即可使用：
+
+| Agent | 入口 |
+| --- | --- |
+| Claude Code | `CLAUDE.md` |
+| OpenAI Codex | `AGENTS.md` |
+| Cursor | `.cursor/rules/boss-jobs.mdc` |
+| Gemini CLI | `GEMINI.md` |
+| GitHub Copilot Agent | `.github/copilot-instructions.md` |
+| WorkBuddy / 其他 | `prompts/universal-agent-prompt.md` |
+
+最小提示词：
+
+```text
+读 AGENTS.md 和 SKILL.md，按里面的流程帮我采集 BOSS 直聘「AI 工程师」岗位并生成看板。
+输出到 <OUT>。登录我自己来，其他你完成。缺 JD 要补全再交付。
+```
+
+更多可复制提示词（首次采集、巡检、问题修复）见 `prompts/README.md`。
+
 ## 快速开始
 
 ### 1. 安装依赖
