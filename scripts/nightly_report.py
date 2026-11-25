@@ -148,8 +148,10 @@ def issue_section(output_dir, limit=8):
         lines.append(f"- [{tag}] {e['title']}{link}")
     if failed:
         last = failed[-1]
-        reason = str(last.get("output") or last.get("error") or "")[:120].replace("\n", " ")
-        lines.append(f"- 最近一次失败：{last.get('at')} {reason}")
+        reason = str(last.get("error") or last.get("output") or last.get("list_error")
+                     or last.get("detail") or "").strip()[:120].replace("\n", " ")
+        # 失败记录里没有原因时不要把空串直接拼进报告，否则只剩一个时间戳
+        lines.append(f"- 最近一次失败：{last.get('at')} {reason or last.get('action', '')}")
     return lines, (closed, opened, len(failed))
 
 
@@ -240,6 +242,9 @@ def main():
     open_issues = open_issue_count()
     if open_issues is not None:
         issue_lines.append(f"- GitHub 实际 open：{open_issues} 条")
+    else:
+        # gh 不可达时「查不到」不等于「没有」，报告不能把未知写成 0（#23 同类失真）
+        issue_lines.append("- GitHub 实际 open：未能核对（gh/api.github.com 不可达，以本地台账为准）")
     lines += issue_lines
     lines += [
         "- 保留护栏：自动投递默认关闭；测试简历拒绝启用；风控/验证码立即停止。",
@@ -266,9 +271,13 @@ def main():
     tail = logs[-3:]
     tail_ok = bool(tail) and all(x.get("status") == "ok" for x in tail)
     open_now = open_issue_count()
-    if open_now is None:
+    issues_unchecked = open_now is None
+    if issues_unchecked:
         open_now = (_issue_counts or (0, 0, 0))[1] if _issue_counts else 0
-    if tail_ok and not open_now:
+    if issues_unchecked and tail_ok:
+        verdict = (f"数据链路正常：最近 {len(tail)} 轮全部 ok；GitHub 不可达，open 工单未核对"
+                   f"（本地台账未关 {open_now} 条）")
+    elif tail_ok and not open_now:
         verdict = f"数据链路正常：最近 {len(tail)} 轮全部 ok，GitHub 无 open 工单"
     elif tail_ok:
         verdict = f"数据链路正常：最近 {len(tail)} 轮全部 ok，但仍有 {open_now} 个 open 工单待推进"
@@ -301,6 +310,16 @@ def main():
     thin = sorted([f"{k}（{v}）" for k, v in pool.items() if v and v < 15])
     top_pool = sorted(pool.items(), key=lambda kv: -kv[1])[:3]
     failed_rounds = [x for x in logs if x.get("status") != "ok"]
+    # 只看 errors 里到底写了什么，别在方案里写死某个历史根因（#19 的同类问题）
+    first_err = ""
+    for x in failed_rounds:
+        errs = [e for e in (x.get("errors") or []) if str(e).strip()]
+        if errs:
+            first_err = str(errs[0]).strip()[:80]
+            break
+    offline_rounds = sum(
+        1 for x in logs
+        if any(str(e).startswith(("cdp_down", "login_required")) for e in (x.get("errors") or [])))
 
     gaps = []
     if advice:
@@ -320,8 +339,15 @@ def main():
         p0.append(f"JD 覆盖率 {cov:.1%}（{jd_n}/{jobs_n}），还差 {backlog} 条；"
                   f"单轮上限 60 条，按当前节奏约 {rounds_needed} 轮补齐，补齐前不要报「数据完整」")
     if failed_rounds:
-        p0.append(f"复盘 {len(failed_rounds)} 个失败轮次（{failed_rounds[0].get('run_at', '-')} 起），"
-                  f"把「等待超时仍落旧主表」这类判 ok 的路径改成显式 error")
+        p0.append(f"复盘 {len(failed_rounds)} 个失败轮次（{failed_rounds[0].get('run_at', '-')} 起）"
+                  + (f"，首个错误：{first_err}" if first_err else "")
+                  + "；把「异常仍判 ok」的路径继续收紧成显式 error")
+    if offline_rounds:
+        p0.append(f"有 {offline_rounds} 轮因 CDP 断开或未登录判错：补一条「离线轮不落旧主表」的护栏"
+                  f"（离线时只做只读检查，不写快照）")
+    if open_issues is None:
+        p0.append("本轮 GitHub 不可达（gh/api.github.com 解析失败）：建单与 push 未完成，"
+                  "网络恢复后补建 issue、push 本地 commit 并用 --close --fixed-by 关联")
     p0.append("keep_days 淘汰与 carry 口径做成可观测指标（carried / expired 进快照表），"
               "否则岗位池「只增不减」时看不出是真实扩量还是僵尸堆积")
 
