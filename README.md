@@ -39,7 +39,7 @@
 输出到 <OUT>。登录我自己来，其他你完成。缺 JD 要补全再交付。
 ```
 
-更多可复制提示词（首次采集、巡检、问题修复）见 `prompts/README.md`。
+要直接分享给别人，用 `prompts/shareable-prompt.md`：里面自带仓库地址、克隆命令和完整边界说明。更多提示词见 `prompts/README.md`。
 
 ## 快速开始
 

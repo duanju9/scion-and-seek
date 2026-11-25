@@ -14,11 +14,15 @@
 | WorkBuddy | `SKILL.md` | 把仓库放进 skills 目录，或直接粘贴通用提示词 |
 | ChatGPT / Claude 网页版 | 无自动读取 | 上传仓库压缩包或粘贴 `AGENTS.md` + 通用提示词；没有本地文件权限时只能做方案，不要假装执行了命令 |
 
+## 直接分享给别人的提示词
+
+`prompts/shareable-prompt.md`：自带仓库地址、克隆命令、采集/补 JD/看板/简历/边界说明，复制即可发给其他人。
+
 ## 三种直接可用的提示词
 
-1. **通用版**：`prompts/universal-agent-prompt.md`（中英双语，适合任何 Agent）
-2. **首次采集**：见下方“最小可用”
-3. **夜间巡检**：见下方“巡检”
+1. **分享版**：`prompts/shareable-prompt.md`（推荐直接转发）
+2. **通用版**：`prompts/universal-agent-prompt.md`（中英双语，适合任何 Agent）
+3. **首次采集 / 巡检**：见下方“最小可用”和“巡检”
 
 ### 最小可用
 
