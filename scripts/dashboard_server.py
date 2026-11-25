@@ -662,6 +662,9 @@ class RefreshManager:
             time.sleep(5)   # 先把 HTTP 服务让出来，再在后台做登录检查
             while True:
                 try:
+                    # 先回收上一轮遗留的 running 残影，否则 is_running() 永远为真、调度永不触发（#20）
+                    if refresh_data.recover_stale_state(self.state_path):
+                        print("检测到上一轮刷新遗留的 running 状态（线程已消失），已回收为 error 并重试")
                     if self._due() and self._can_refresh():
                         self.request(force=True)
                 except Exception:
@@ -914,6 +917,12 @@ def main():
     apply_manager = ApplyManager(cfg, apply_state, resume_path, args.apply_limit,
                                  args.apply_gap_min, args.apply_gap_max, args.send_resume)
     manager = RefreshManager(cfg, state_path, args.interval_minutes, apply_manager)
+    # 启动即回收僵尸 running 状态，避免重启后立刻继承死线程的残影（#20）
+    try:
+        if refresh_data.recover_stale_state(state_path):
+            print("上一轮刷新遗留 running 状态已回收（线程已消失），本轮会重新刷新")
+    except Exception as e:
+        print(f"僵尸刷新状态回收失败：{e}")
     handler = make_handler(args.cdp_port, args.dashboard, manager, out_dir, apply_manager)
     # Windows 上 allow_reuse_address=True 等于 SO_REUSEADDR，重复启动会静默绑定成功，
     # 出现两个进程抢同一份 state/output；这里关掉复用，让第二个实例直接失败。

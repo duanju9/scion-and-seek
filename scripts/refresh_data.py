@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -150,21 +151,89 @@ def backfill_missing_jd(master_path, csv_path, run_keyword, cfg, tmp_dir, log,
     return jobs, len(missing), cov2
 
 
-def _run(cmd, timeout, log):
-    """执行子脚本，返回 (ok, 输出摘要)。"""
-    log.append("$ " + " ".join(cmd))
+def _pid_alive(pid):
+    """判断进程是否还活着（跨平台，不依赖 psutil）。"""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout)
-        out = (p.stdout or "") + (p.stderr or "")
+        pid = int(pid)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # Windows 上 os.kill(pid, 0) 会直接终止进程，必须走 OpenProcess
+        import ctypes
+        SYNCHRONIZE = 0x00100000
+        h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+        if not h:
+            return False
+        try:
+            return ctypes.windll.kernel32.WaitForSingleObject(h, 0) == 0x00000102  # WAIT_TIMEOUT=活着
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _kill_tree(p):
+    """结束子进程及其子进程；失败也不抛出，避免卡在清理上。"""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           capture_output=True, timeout=20)
+        else:
+            os.killpg(os.getpgid(p.pid), 9)
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+def _run(cmd, timeout, log):
+    """执行子脚本，返回 (ok, 输出摘要)。
+
+    输出重定向到临时文件而不是管道：管道模式下只要孙进程继承了写端句柄，
+    子进程退出后父进程仍等不到 EOF，communicate() 会无限阻塞（timeout 也进不去），
+    整条刷新线程就此挂死（#20）。文件句柄不会出现这种继承死等。
+    """
+    log.append("$ " + " ".join(cmd))
+    tmp = os.path.join(tempfile.gettempdir(),
+                       "patrol_run_%d_%d.log" % (os.getpid(), int(time.time() * 1000) % 1000000))
+    try:
+        with open(tmp, "wb") as fh:
+            p = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL,
+                                 start_new_session=(os.name != "nt"))
+            try:
+                rc = p.wait(timeout=timeout if timeout else None)
+            except subprocess.TimeoutExpired:
+                _kill_tree(p)
+                try:
+                    p.wait(timeout=10)
+                except Exception:
+                    pass
+                log.append(f"TIMEOUT after {timeout}s")
+                return False, f"超时 {timeout}s"
+        try:
+            with open(tmp, "r", encoding="utf-8", errors="replace") as fh:
+                out = fh.read()
+        except Exception:
+            out = ""
         log.append(out[-1200:].strip())
-        return p.returncode == 0, out[-400:]
-    except subprocess.TimeoutExpired:
-        log.append(f"TIMEOUT after {timeout}s")
-        return False, f"超时 {timeout}s"
+        return rc == 0, out[-400:]
     except Exception as e:
         log.append(f"ERROR {e}")
         return False, str(e)
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 
 def _logged_in(cdp_port):
@@ -185,6 +254,49 @@ def _logged_in(cdp_port):
             cdp.close()
     except Exception as e:
         return False, f"CDP 连接失败：{e}"
+
+
+def recover_stale_state(state_path, max_minutes=45):
+    """把「持有者已消失」的 running 状态回收成 error。
+
+    刷新线程随服务进程一起死掉时，state 会永久停在 running，
+    而调度只认 status 字段，于是整条刷新链路被一个死线程的残影锁死（#20）。
+    这里按 pid 存活 + 起始时间双重校验，只要有一项证明它不可能还在跑就回收。
+    返回 True 表示做过回收。
+    """
+    state = _load(state_path, {}) or {}
+    if state.get("status") != "running":
+        return False
+    started = str(state.get("started_at") or "")
+    too_old = False
+    try:
+        t0 = datetime.datetime.strptime(started[:19], "%Y-%m-%d %H:%M:%S")
+        too_old = (datetime.datetime.now() - t0).total_seconds() > max_minutes * 60
+    except Exception:
+        too_old = True
+    pid = state.get("pid")
+    pid_dead = (pid is not None) and (not _pid_alive(pid))
+    # 旧版本 state 没有 pid 字段，用刷新锁的持有者兜底判断：锁在但进程没了，说明写它的人已消失
+    lock_pid = None
+    try:
+        with open(os.path.join(os.path.dirname(state_path), "refresh.lock"), encoding="utf-8") as f:
+            lock_pid = json.load(f).get("pid")
+    except Exception:
+        lock_pid = None
+    lock_dead = (lock_pid is not None) and (not _pid_alive(lock_pid))
+    if not (too_old or pid_dead or lock_dead):
+        return False
+    why = "进程已退出" if (pid_dead or lock_dead) else f"运行超过 {max_minutes} 分钟"
+    state.update({
+        "status": "error",
+        "error": f"上一轮刷新异常中断（{why}），已回收，下一轮重试",
+        "finished_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    steps = state.get("steps") or []
+    steps.append(f"[recover] 上一轮刷新遗留 running 状态（{why}），已回收为 error 以便重试")
+    state["steps"] = steps
+    _write_state(state_path, state)
+    return True
 
 
 def _lock_age(path):
@@ -219,6 +331,19 @@ def acquire_lock(hist_dir, stale_seconds=45 * 60):
             return path
         except FileExistsError:
             age = _lock_age(path)
+            holder = None
+            try:
+                with open(path, encoding="utf-8") as f:
+                    holder = json.load(f).get("pid")
+            except Exception:
+                holder = None
+            # 持锁进程已死就立刻可抢占：等满 45 分钟会让死锁把整夜巡检吞掉（#20）
+            if holder is not None and not _pid_alive(holder):
+                try:
+                    os.replace(path, path + ".stale")
+                except Exception:
+                    pass
+                continue
             if age > stale_seconds:
                 try:
                     os.replace(path, path + ".stale")
@@ -283,6 +408,7 @@ def refresh(cfg, state_path, logged_check=None):
         "error": "", "steps": [], "ok_jobs": 0, "ok_jd": 0,
         "keyword": run_keyword, "keywords": all_keywords,
         "keyword_index": kw_idx, "new_jobs": 0,
+        "pid": os.getpid(),
     })
     log = _Logger(state, state_path)
     _write_state(state_path, state)

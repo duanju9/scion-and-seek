@@ -23,6 +23,7 @@
    - 关键词按 `<输出>/keywords.json` 轮换，每轮换一个词；`refresh_state.json` 里的 `keyword_index` 记录下一轮用哪个。要改采集范围就改 `keywords.json`，不用改命令行。
    - 判断本轮是否真的扩量：看 `/api/refresh/status` 的 `new_jobs` 与 `pool_by_keyword`，`new_jobs=0` 连续两轮就说明该词已抓透，可以换词或加页。
    - 刷新正在运行：等待结束；不要同时触发第二次。
+   - 若 `/api/refresh/status` 长时间（>45 分钟）停在 `running` 且 `steps` 不再增长，视为**线程已死留下的僵尸状态**：服务启动时与每 30 秒调度前都会自动回收成 `error`（判据 = state 里的 pid 已不存在 / 刷新锁持有者已不存在 / 起始时间超 45 分钟）。回收后本轮会重新刷新，本条要记进日志；连续出现说明脚本又在管道或浏览器上挂住，按 #20 的思路查 `_run` 与 CDP 会话。
    - 未登录：记录 `login_required`，跳过在线采集，不扫码、不绕过验证码。
 
 3. **单轮巡检**
