@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.zip
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db
+
+# 本地采集与个人数据，绝不提交
+out/
+output/
+data/
+resume.json
+targets.json
+*.db
+*.sqlite
+snapshot_*.json
+refresh_state.json
+auto_apply_state.json
+chrome-profile/
