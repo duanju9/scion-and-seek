@@ -548,41 +548,47 @@ class NetworkJoblistCapture:
             method = ev.get("method", "")
             params = ev.get("params", {})
             if method == "Network.requestWillBeSent":
-                url = params.get("request", {}).get("url", "")
-                if self._is_joblist_url(url):
-                    requests[params.get("requestId")] = url
+                req = params.get("request", {}) or {}
+                if self._is_joblist_url(req.get("url", "")):
+                    requests[params.get("requestId")] = req
             elif method == "Network.loadingFinished":
                 finished.add(params.get("requestId"))
-        for request_id, url in requests.items():
+        for request_id, req in requests.items():
             if request_id in finished and request_id not in self._consumed:
-                if not self._matches_keyword(url):
+                if not self._matches_keyword(req):
                     # 串词响应：直接标记消费并丢弃，继续等本轮关键词的结果
                     self._consumed.add(request_id)
-                    log.debug("丢弃非本轮关键词的列表响应: %s", url[:160])
+                    log.debug("丢弃非本轮关键词的列表响应: %s", str(req.get("url", ""))[:160])
                     continue
                 return request_id
         return None
 
-    def _matches_keyword(self, url):
-        """列表请求的 query 是否等于本轮关键词。
+    def _matches_keyword(self, request):
+        """列表请求是否属于本轮关键词（#10）。
 
-        没指定关键词时不做限制；指定了但请求没带 query（例如推荐流）也不收，
-        宁可本轮少抓，也不把别的词的结果算到当前词头上。
+        BOSS 的 joblist 请求 URL 只有 ``?_=时间戳``，真正带搜索条件的是 Referer
+        （``/web/geek/jobs?query=...&city=...``）。所以先看 URL 的 query，再看
+        Referer 的 query。换关键词时旧文档还会继续发请求，Referer 里是上一个词，
+        不校验就会把旧词结果按新词入库。
         """
         if not self.expect_keyword:
             return True
-        try:
-            pairs = parse_qsl(urlparse(url).query, keep_blank_values=True)
-        except Exception:
-            return True
-        query = ""
-        for key, value in pairs:
-            if key in ("query", "keyword"):
-                query = (value or "").strip()
-                break
-        if not query:
-            return False
-        return query.replace(" ", "") == self.expect_keyword.replace(" ", "")
+        want = self.expect_keyword.replace(" ", "")
+        for source in (request.get("url", ""),
+                       (request.get("headers") or {}).get("Referer", ""),
+                       (request.get("headers") or {}).get("referer", "")):
+            if not source:
+                continue
+            try:
+                pairs = parse_qsl(urlparse(source).query, keep_blank_values=True)
+            except Exception:
+                continue
+            for key, value in pairs:
+                if key in ("query", "keyword"):
+                    if (value or "").strip().replace(" ", "") == want:
+                        return True
+                    break
+        return False
 
     @staticmethod
     def _is_joblist_url(url):
