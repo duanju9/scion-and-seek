@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -30,10 +31,34 @@ def now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def gh(args, timeout=60):
+TRANSIENT = ("Something went wrong", "Server Error", "Internal Server Error",
+             "502", "503", "504", "timeout", "timed out", "Connection reset",
+             "connection reset", "EOF", "TLS handshake", "temporarily unavailable")
+BACKOFF = (3, 8, 15)
+
+
+def gh(args, timeout=60, stdin=None):
     return subprocess.run(["gh"] + args, cwd=ROOT, capture_output=True,
                           text=True, encoding="utf-8", errors="replace",
-                          timeout=timeout)
+                          timeout=timeout, input=stdin)
+
+
+def is_transient(p):
+    if p is None or p.returncode == 0:
+        return False
+    text = ((p.stderr or "") + (p.stdout or ""))
+    return any(k in text for k in TRANSIENT)
+
+
+def gh_retry(args, tries=3, timeout=60, stdin=None, sleep=time.sleep):
+    """临时性 5xx / 超时按退避重试；标签、权限类错误立即返回，不浪费重试。"""
+    p = None
+    for i in range(max(1, tries)):
+        p = gh(args, timeout=timeout, stdin=stdin)
+        if p.returncode == 0 or not is_transient(p) or i == max(1, tries) - 1:
+            return p
+        sleep(BACKOFF[min(i, len(BACKOFF) - 1)])
+    return p
 
 
 def ensure_labels():
@@ -58,23 +83,28 @@ def repo_slug():
     return (p.stdout or "").strip() if p.returncode == 0 else ""
 
 
-def rest_issue(action, number=None, title="", body="", labels=None):
-    """gh issue 的 GraphQL 偶发失败时，退回 REST API。"""
+def rest_issue(action, number=None, title="", body="", labels=None, tries=3):
+    """gh issue 的 GraphQL 偶发失败时，退回 REST API。
+
+    用 JSON 载荷（--input -）而不是 -f 键值，避免 labels 数组被当成字符串传坏。
+    """
     slug = repo_slug()
     if not slug:
         return None
     path = f"repos/{slug}/issues" + (f"/{number}" if number else "")
     if action == "create":
-        cmd = ["api", "-X", "POST", path, "-f", f"title={title}", "-f", f"body={body}"]
-        for lab in labels or []:
-            cmd += ["-f", f"labels[]={lab}"]
+        payload = {"title": title, "body": body, "labels": labels or []}
+        cmd = ["api", "-X", "POST", path, "--input", "-"]
     elif action == "comment":
-        cmd = ["api", "-X", "POST", path + "/comments", "-f", f"body={body}"]
+        payload = {"body": body}
+        cmd = ["api", "-X", "POST", path + "/comments", "--input", "-"]
     elif action == "close":
-        cmd = ["api", "-X", "PATCH", path, "-f", "state=closed"]
+        payload = {"state": "closed"}
+        cmd = ["api", "-X", "PATCH", path, "--input", "-"]
     else:
         return None
-    return gh(cmd)
+    return gh_retry(cmd, tries=tries,
+                    stdin=json.dumps(payload, ensure_ascii=False))
 
 
 def record(output_dir, payload):
@@ -94,6 +124,8 @@ def main():
     ap.add_argument("--close", action="store_true", help="关闭同标题的 open issue")
     ap.add_argument("--fixed-by", default="", help="修复 commit / PR")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--retries", type=int, default=3,
+                    help="临时性 5xx/超时的重试次数（退避 3/8/15 秒）")
     args = ap.parse_args()
 
     ensure_labels()
@@ -110,10 +142,11 @@ def main():
             payload.update({"action": "close-miss", "msg": "没有同标题 open issue"})
         else:
             body = f"巡检回归通过，修复已合入。\n\n修复记录：{args.fixed_by or '见最近提交'}\n时间：{now()}"
-            p = gh(["issue", "close", str(hit["number"]), "--comment", body])
+            p = gh_retry(["issue", "close", str(hit["number"]), "--comment", body],
+                         tries=args.retries)
             if p.returncode != 0:
-                rest_issue("comment", hit["number"], body=body)
-                p = rest_issue("close", hit["number"])
+                rest_issue("comment", hit["number"], body=body, tries=args.retries)
+                p = rest_issue("close", hit["number"], tries=args.retries)
             payload.update({"action": "closed" if p is not None and p.returncode == 0 else "close-failed",
                             "url": hit.get("url"), "error": ((p.stderr if p else "") or "")[-300:]})
         record(args.output_dir, payload)
@@ -124,11 +157,13 @@ def main():
     body += f"\n\n---\n- 来源：夜间巡检\n- 时间：{now()}\n- 环境：Windows / Chrome CDP 9222 / 工作台 8765\n"
     labels = [x.strip() for x in args.labels.split(",") if x.strip()]
     if hit:
-        p = gh(["issue", "comment", str(hit["number"]),
-                "--body", f"巡检再次发现同类问题（{now()}）：\n\n{body}"])
+        p = gh_retry(["issue", "comment", str(hit["number"]),
+                      "--body", f"巡检再次发现同类问题（{now()}）：\n\n{body}"],
+                     tries=args.retries)
         if p.returncode != 0:
             p = rest_issue("comment", hit["number"],
-                           body=f"巡检再次发现同类问题（{now()}）：\n\n{body}")
+                           body=f"巡检再次发现同类问题（{now()}）：\n\n{body}",
+                           tries=args.retries)
         payload.update({"action": "commented" if p is not None and p.returncode == 0 else "comment-failed",
                         "url": hit.get("url"), "number": hit["number"],
                         "error": ((p.stderr if p else "") or "")[-300:]})
@@ -136,9 +171,10 @@ def main():
         cmd = ["issue", "create", "--title", args.title, "--body", body]
         for lab in labels:
             cmd += ["--label", lab]
-        p = gh(cmd)
+        p = gh_retry(cmd, tries=args.retries)
         if p.returncode != 0:
-            p = rest_issue("create", title=args.title, body=body, labels=labels)
+            p = rest_issue("create", title=args.title, body=body, labels=labels,
+                           tries=args.retries)
         out = (p.stdout if p else "") or (p.stderr if p else "") or ""
         try:
             created = json.loads(out)
