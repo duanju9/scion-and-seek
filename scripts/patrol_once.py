@@ -57,7 +57,18 @@ def wait_refresh(base, max_minutes=9):
     return last
 
 
+def server_alive(base, timeout=5):
+    """端口上已有活服务时返回 True，避免重复拉起第二个实例。"""
+    try:
+        api(base, "/api/status", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def maybe_start_server(args):
+    if server_alive(args.base):
+        return True
     script = os.path.join(args.skill_dir, "scripts", "dashboard_server.py")
     cmd = [sys.executable, script, "--port", str(args.port), "--cdp-port", str(args.cdp_port),
            "--dashboard", args.dashboard, "--output-dir", args.output_dir,
@@ -69,8 +80,12 @@ def maybe_start_server(args):
         kwargs["start_new_session"] = True
     try:
         subprocess.Popen(cmd, **kwargs)
-        time.sleep(5)
-        return True
+        # 起来后二次确认，起不来就别当成已启动
+        for _ in range(6):
+            time.sleep(2)
+            if server_alive(args.base):
+                return True
+        return False
     except Exception:
         return False
 

@@ -878,6 +878,8 @@ def main():
     ap.add_argument("--history-dir", default="", help="快照目录")
     ap.add_argument("--interval-minutes", type=int, default=30, help="自动刷新间隔分钟，0=关闭")
     ap.add_argument("--keyword", default="AI 工程师")
+    ap.add_argument("--keywords", default="",
+                    help="多关键词按轮次轮换，用 | 或 , 分隔；给了就覆盖 --keyword")
     ap.add_argument("--city", default="100010000")
     ap.add_argument("--pages", type=int, default=8)
     ap.add_argument("--gap-min", type=float, default=2.5)
@@ -893,8 +895,12 @@ def main():
     out_dir = args.output_dir or os.path.dirname(os.path.abspath(args.dashboard))
     hist = args.history_dir or os.path.join(os.path.expanduser("~"), ".boss-zhipin-scraper", "history")
     state_path = os.path.join(hist, "refresh_state.json")
+    kw_list = [k.strip() for k in (args.keywords or "").replace("|", ",").split(",") if k.strip()]
     cfg = {
-        "keyword": args.keyword, "city": args.city, "pages": args.pages,
+        # keywords 留空时由 refresh_data.load_keywords 去读 output/keywords.json，
+        # 这样即使 patrol_once 不带参数重启服务，多关键词轮换也不会丢
+        "keyword": args.keyword, "keywords": kw_list,
+        "city": args.city, "pages": args.pages,
         "cdp_port": args.cdp_port, "output_dir": out_dir,
         "history_dir": hist, "dashboard": args.dashboard,
         "gap_min": args.gap_min, "gap_max": args.gap_max,
@@ -906,7 +912,14 @@ def main():
                                  args.apply_gap_min, args.apply_gap_max, args.send_resume)
     manager = RefreshManager(cfg, state_path, args.interval_minutes, apply_manager)
     handler = make_handler(args.cdp_port, args.dashboard, manager, out_dir, apply_manager)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    # Windows 上 allow_reuse_address=True 等于 SO_REUSEADDR，重复启动会静默绑定成功，
+    # 出现两个进程抢同一份 state/output；这里关掉复用，让第二个实例直接失败。
+    ThreadingHTTPServer.allow_reuse_address = False
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    except OSError as e:
+        print(f"端口 {args.port} 已被占用（{e}），已有工作台在运行，本进程退出")
+        return 1
     url = f"http://127.0.0.1:{args.port}/"
     print(f"工作台已启动：{url}")
     print("API：/api/status /api/login /api/conversations /api/messages /api/greet "
