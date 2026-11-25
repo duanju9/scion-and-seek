@@ -70,14 +70,26 @@ python scripts/merge_to_master.py --jobs out/boss_jobs.json --details out/boss_d
   --out-json out/岗位公司信息_含JD.json --out-csv out/岗位公司信息_含JD.csv
 ```
 
-### 4. 生成看板
+### 4. 多关键词轮换与 JD 兜底
+
+单关键词只能看到一类岗位，`refresh_data.py` 支持按轮次轮换关键词。把轮换顺序写进 `out/keywords.json`，服务重启后也会继续沿用：
+
+```json
+{ "keywords": ["AI 工程师", "AI 产品经理", "解决方案工程师", "售前工程师", "B端产品经理"] }
+```
+
+- 每轮只抓其中一个词，`merge_to_master.py` 按 `job_id` 与上期主表取并集，`last_seen` 超过 7 天（`--keep-days`）才淘汰，换词那一轮不会把别的岗位整表冲掉。
+- 每行带 `source_keyword`（该岗位是被哪个词搜到的），看板头部会显示关键词分布。
+- 第 3 步补抓有总超时，新增岗位一多会截断。合并后会按 `min_jd_coverage`（默认 0.9）检查 JD 覆盖率，不达标就只对缺失岗位再补一轮，补完重新合并；仍不齐时把 `jd_coverage` / `jd_missing` 写进 `refresh_state.json`，不再静默留缺口。
+
+### 5. 生成看板
 
 ```bash
 python scripts/generate_dashboard.py --input out/岗位公司信息_含JD.json \
   --output out/岗位数据看板.html --trends out/trends.json
 ```
 
-### 5. 启动工作台
+### 6. 启动工作台
 
 ```bash
 python scripts/dashboard_server.py --port 8765 --cdp-port 9222 \
