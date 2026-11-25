@@ -42,6 +42,43 @@ def parse_ts(s):
         return None
 
 
+def prior_snapshot(patrol_dir):
+    """取最近一份 patrol JSON 里的快照时间，用来判断快照是否递增。"""
+    try:
+        files = sorted(f for f in os.listdir(patrol_dir) if f.startswith("patrol_") and f.endswith(".json"))
+    except Exception:
+        return "", ""
+    for fn in reversed(files):
+        d = load_json(os.path.join(patrol_dir, fn), {}) or {}
+        ts = str(((d.get("db") or {}).get("latest_snapshot")) or "")
+        if ts:
+            return ts, fn
+    return "", ""
+
+
+def data_checks(db, prev_snapshot):
+    """把 runbook 的三条异常标准写成可执行检查：岗位 0 / JD 覆盖 <90% / 快照未递增。"""
+    out = {"ok": True, "jd_coverage": None, "latest_snapshot": "",
+           "prev_snapshot": prev_snapshot, "notes": []}
+    jobs = int(db.get("jobs") or 0)
+    jd = int(db.get("jd_jobs") or 0)
+    latest = str(db.get("latest_snapshot") or "")
+    out["latest_snapshot"] = latest
+    if jobs <= 0:
+        out["ok"] = False
+        out["notes"].append("岗位数为 0：列表采集失败或登录态失效")
+    else:
+        cov = jd / float(jobs)
+        out["jd_coverage"] = round(cov, 4)
+        if cov < 0.9:
+            out["ok"] = False
+            out["notes"].append(f"JD 覆盖率 {cov:.1%} < 90%（{jd}/{jobs}）")
+    if prev_snapshot and latest and latest < prev_snapshot:
+        out["ok"] = False
+        out["notes"].append(f"最新快照 {latest} 早于上轮 {prev_snapshot}，快照未递增")
+    return out
+
+
 def wait_refresh(base, max_minutes=9):
     deadline = time.time() + max_minutes * 60
     last = {}
@@ -215,6 +252,14 @@ def main():
             log["errors"].append(f"ingest_db: {(p.stderr or p.stdout)[-300:]}")
     except Exception as e:
         log["errors"].append(f"ingest_db exception: {e}")
+
+    # 数据异常判定（runbook：岗位 0 / JD 覆盖 <90% / 快照未递增）
+    patrol_dir = os.path.join(args.output_dir, "patrol")
+    prev_snap, prev_file = prior_snapshot(patrol_dir) if os.path.isdir(patrol_dir) else ("", "")
+    log["checks"] = data_checks(log.get("db") or {}, prev_snap)
+    log["checks"]["prev_patrol"] = prev_file
+    for note in log["checks"]["notes"]:
+        log["errors"].append("data check: " + note)
 
     # API 冒烟
     for path in ("/api/jobs", "/api/trends", "/api/resume/status", "/api/auto-apply/status"):
