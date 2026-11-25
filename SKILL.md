@@ -211,6 +211,15 @@ python "$S/nightly_report.py" --output-dir "<交付目录>"
 
 `patrol_once.py` 只做健康检查、等待/触发刷新、落库、编译与看板静态检查、更新 `简历优化建议.md`，**不发送招呼、不启用自动投递、不修改原始简历**。服务未启动时可加 `--start-server` 尝试拉起；登录失效只记录，不绕过验证码。`nightly_report.py` 汇总 `patrol/patrol_*.json`、`jobs.db` 与趋势，输出 `夜间巡检报告_*.md` 和 `优化方案_*.md`。
 
+发现问题先记 GitHub Issue，修复后关闭：
+
+```bash
+python "$S/report_issue.py" --title "巡检：<现象>" --labels patrol,bug --body "<根因/影响/证据>"
+python "$S/report_issue.py" --title "巡检：<现象>" --close --fixed-by "<commit>"
+```
+
+同标题 open issue 只追加评论；GraphQL 失败自动走 REST；无 `gh` 时写 `output/issues.jsonl`。不要把简历、手机号、Cookie、token 写进 issue。
+
 ### 可选：自动打招呼
 
 按用户要求向目标岗位发送招呼语，支持单条与批量（个人自用）。

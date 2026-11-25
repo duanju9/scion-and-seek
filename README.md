@@ -89,11 +89,27 @@ scripts/
   ingest_db.py               岗位主表/快照落 SQLite
   patrol_once.py             夜间巡检单轮（健康/刷新/落库/测试/简历建议）
   nightly_report.py          巡检报告与优化方案
+  report_issue.py            巡检问题写入 GitHub Issue（幂等 + 修复后关闭）
 references/
   architecture.md            架构图、刷新流程图、投递时序图
   workflow.md                参数速查与踩坑
   project-comparison.md      方案对比
 ```
+
+## 巡检问题 -> GitHub Issue
+
+巡检发现可复现问题时，先建 issue 再修，修复后关闭，形成可追溯记录：
+
+```bash
+python scripts/report_issue.py --title "巡检：登录按钮卡住" \
+  --labels patrol,bug --body "现象、根因、影响范围"
+
+# 修复并回归后
+python scripts/report_issue.py --title "巡检：登录按钮卡住" \
+  --close --fixed-by "<commit>"
+```
+
+同一标题已有 open issue 时只追加评论，不重复创建；GraphQL 失败会自动退回 REST API。没有 `gh` 或未登录时写入 `output/issues.jsonl`，不阻塞巡检。
 
 ## 已知限制
 

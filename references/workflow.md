@@ -111,6 +111,9 @@ patrol_once.py    --output-dir 交付目录 [--base http://127.0.0.1:8765]
                   单轮巡检；不发送招呼/不投递/不修改原始简历
 nightly_report.py --output-dir 交付目录 [--db jobs.db]
                   汇总巡检日志/DB/趋势，生成报告与优化方案
+report_issue.py   --title "巡检：<现象>" [--body ...] [--labels patrol,bug]
+                  [--close --fixed-by <commit>] [--dry-run]
+                  同标题 open issue 幂等；GraphQL 失败走 REST；无 gh 写 output/issues.jsonl
 ```
 
 简历 JSON 字段：`skills`、`years_experience`、`education`、`target_roles`、`contact`、`sections`、`raw_text`。扫描件 PDF 无文本层，需先 OCR 再解析。
