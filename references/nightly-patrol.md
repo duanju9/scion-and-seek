@@ -35,9 +35,9 @@
 5. **发现问题 -> GitHub Issue**
    - 先查是否已有同标题 open issue（脚本自动去重）。
    - 创建：
-     `python "<Skill>/scripts/report_issue.py" --title "巡检：<现象>" --labels patrol,bug --body "<现象/根因/影响/证据>"`
+     `python "<Skill>/scripts/report_issue.py" --output-dir "<输出>" --title "巡检：<现象>" --labels patrol,bug --body "<现象/根因/影响/证据>"`
    - 修复并回归后关闭：
-     `python "<Skill>/scripts/report_issue.py" --title "巡检：<现象>" --close --fixed-by "<commit>"`
+     `python "<Skill>/scripts/report_issue.py" --output-dir "<输出>" --title "巡检：<现象>" --close --fixed-by "<commit>"`
    - issue 里不要写简历、手机号、Cookie、token、完整 JD 里的个人信息。
    - 如果是改进项用 `--labels patrol,enhancement`；需要人工确认加 `needs-review`。
 
