@@ -186,6 +186,12 @@ API：`/api/status`、`/api/login`、`/api/conversations`、`/api/messages?who=`
 10. 筛选/排序只允许在 `jobquery.py` 里实现。页面、导出、API 三处各写一套时，「城市叫香港还是中国香港」「q 搜不搜行业」「薪资按上限还是中位排序」必然分叉——页面 42 条、导出 39 条，看起来却都对。
 11. 主表 2MB+，必须 `os.replace` 原子写；`json.dump` 直写期间读方会拿到半截 JSON（`JSONDecodeError`），表现为「偶尔打不开看板/导出失败」。
 12. 调度器的 `next_at` 不能只按 `last_ok_at` 算，否则一轮失败后页面会显示一个过去的「下次时间」；失败后也不要每 30 秒重试，按 5 分钟退避。
+13. Windows 上 `subprocess.run(..., text=True)` 会用 UTF-8 解 `netstat`/`tasklist` 的 GBK 输出，读线程抛 `UnicodeDecodeError`、`stdout` 变成 None——症状是「pid 永远查不到」，看护与停止静默失效。统一用字节捕获 + utf-8/gbk 兜底解码。
+14. 端口在监听但 `/api/status` 超时，不要立刻再起一个实例：`allow_reuse_address=False` 会让第二个进程撞端口退出，报成「启动后立即退出」。先等 15 秒探活，再把「端口被占但无响应」当成独立结论。
+15. Excel 单元格上限 32767 字符，超长 JD 会被静默截断；openpyxl 还会把 `=` 开头的字符串写成公式。导出前主动截断并标注，写入后把 `=` 开头的单元格 `data_type` 改回 `s`。
+16. 主表可能因手工合并/多批次出现重复 `job_id`，查询层按「JD 更完整」去重；否则看板、导出、报告三处计数一起虚高。
+17. 页面 KPI 不能直接信 `has_jd` 标记，要与导出同源（按 JD 实际内容判断），否则回填过的岗位两边口径不同。
+18. 自检 `scripts/selftest.py`（49 项）是每轮改动的验收闸门：正常库/空库/缺主表/脏数据/并发/JS 语法，全绿才算过。
 
 ### 第 8 步：持续更新与行业岗位趋势（工作台默认开启）
 

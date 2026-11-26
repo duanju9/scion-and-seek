@@ -33,6 +33,14 @@ import urllib.request
 import webbrowser
 from datetime import datetime
 
+# Windows 控制台默认是 GBK/CP437，日志里有中文与特殊符号时 print 会直接抛
+# UnicodeEncodeError，把「启动失败」伪装成「脚本崩了」。统一成 UTF-8 + 替换。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_ROOT = os.path.dirname(HERE)
 LOCAL_PORT = 8765
@@ -113,16 +121,31 @@ def log(out, msg, tag="workbench"):
         pass
 
 
+def run_capture(cmd, timeout=10):
+    """跑系统命令并按 Windows 实际代码页解码。
+
+    直接 text=True 会用 UTF-8 去解 netstat/tasklist 的 GBK 输出，读线程抛
+    UnicodeDecodeError 后 stdout 变成 None——表现为「pid 永远查不到」，
+    看护与停止功能因此静默失效。
+    """
+    try:
+        raw = subprocess.run(cmd, capture_output=True, timeout=timeout).stdout or b""
+    except Exception:
+        return ""
+    for enc in ("utf-8", "gbk", "mbcs"):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
 def pid_alive(pid):
     if not pid:
         return False
     if os.name == "nt":
-        try:
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                                 capture_output=True, text=True, timeout=8).stdout
-            return str(pid) in out
-        except Exception:
-            return False
+        out = run_capture(["tasklist", "/FI", f"PID eq {pid}", "/NH"], timeout=8)
+        return bool(out) and str(pid) in out
     try:
         os.kill(int(pid), 0)
         return True
@@ -211,16 +234,53 @@ def server_cmd(out, dashboard, interval):
 
 
 def server_up():
+    """只有回的是我们自己的 /api/status 才算在跑。
+
+    只看端口能不能连会误判：别的程序占着 8765 时，启动器会以为工作台已在运行，
+    然后打开一个空页面。
+    """
     try:
-        http_json(f"http://127.0.0.1:{LOCAL_PORT}/api/status", timeout=8)
-        return True
+        d = http_json(f"http://127.0.0.1:{LOCAL_PORT}/api/status", timeout=8)
+        return isinstance(d, dict) and ("cdp" in d or "profile" in d)
     except Exception:
         return False
+
+
+def port_pid(port):
+    """找出监听该端口的进程号（用于停止不是本工具启动的实例）。"""
+    try:
+        if os.name == "nt":
+            out = run_capture(["netstat", "-ano"], timeout=10)
+            for line in out.splitlines():
+                if f":{port}" in line and "LISTENING" in line.upper():
+                    parts = line.split()
+                    if parts and parts[-1].isdigit():
+                        return int(parts[-1])
+        else:
+            out = subprocess.run(["lsof", "-ti", f"tcp:{port}"], capture_output=True,
+                                 text=True, timeout=10).stdout.strip()
+            if out:
+                return int(out.split()[0])
+    except Exception:
+        pass
+    return None
 
 
 def ensure_server(out, dashboard, interval=30, wait=25):
     if server_up():
         return True, "服务已在运行"
+    # 端口有人监听但接口没回：可能是刚启动还没就绪，也可能进程卡住。
+    # 这时直接再起一个只会撞端口（allow_reuse=False），报「启动后立即退出」，
+    # 看起来像启动失败，其实是老实例还活着。
+    if port_pid(LOCAL_PORT):
+        log(out, f"端口 {LOCAL_PORT} 已被占用，等待接口恢复")
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            time.sleep(1)
+            if server_up():
+                return True, "服务已在运行（首次探测超时）"
+        return False, (f"端口 {LOCAL_PORT} 被占用（pid={port_pid(LOCAL_PORT)}）"
+                       f"但 /api/status 无响应，请先运行 stop 或手动结束该进程")
     if not os.path.isfile(dashboard):
         return False, f"看板文件不存在：{dashboard}（先跑一次 generate_dashboard.py）"
     cmd = server_cmd(out, dashboard, interval)
@@ -342,7 +402,23 @@ def cmd_stop(args):
         if pid_alive(pid):
             kill_pid(pid)
             log(out, f"已停止 {key}={pid}")
+    # 兜底：服务是用户手动起的、或 state 被删过时，按端口找监听进程再停一次。
+    # 只有 /api/status 回的是我们的 JSON 才动手，避免误杀别的程序。
+    if server_up():
+        pid = port_pid(LOCAL_PORT)
+        if pid and kill_pid(pid):
+            log(out, f"已停止占用 {LOCAL_PORT} 的工作台进程 pid={pid}")
+        else:
+            log(out, f"端口 {LOCAL_PORT} 仍有响应，但没找到可停止的进程")
     save_state(out, server_pid=None, watchdog_pid=None)
+    for _ in range(10):
+        if not server_up():
+            break
+        time.sleep(0.5)
+    if server_up():
+        log(out, f"警告：{LOCAL_PORT} 仍有响应，可能被其它程序占用")
+    else:
+        log(out, f"服务已停止，端口 {LOCAL_PORT} 已释放")
     if args.with_chrome and cdp_up():
         # 只有显式要求才动浏览器；专用 profile 与用户主 Chrome 不是同一个实例
         log(out, "按参数要求关闭专用浏览器实例")
@@ -352,7 +428,16 @@ def cmd_stop(args):
 
 def start_watchdog(out, dash, interval):
     st = load_state(out)
-    if pid_alive(st.get("watchdog_pid")):
+    # pid 存活不代表看护还活着（pid 可能被系统复用）；beat 超过 3 分钟没更新就重开
+    alive = pid_alive(st.get("watchdog_pid"))
+    beat = st.get("watchdog_beat")
+    if alive and beat:
+        try:
+            age = (datetime.now() - datetime.strptime(beat, "%Y-%m-%d %H:%M:%S")).total_seconds()
+            alive = age < 180
+        except Exception:
+            alive = False
+    if alive:
         return False
     logf = os.path.join(log_dir(out), f"watchdog-{datetime.now():%Y%m%d}.log")
     fh = open(logf, "a", encoding="utf-8")

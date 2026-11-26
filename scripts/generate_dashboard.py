@@ -294,6 +294,9 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 function split(v){ return String(v||'').split('|').map(x=>x.trim()).filter(Boolean); }
+/* 只放行 http(s)：数据来自抓取，万一某条 job_link 是 javascript: 之类的伪协议，
+   点击就会在当前页执行脚本。esc() 只转义 HTML，不校验协议。 */
+function safeUrl(u){ const s=String(u||'').trim(); return /^https?:\/\//i.test(s) ? s : '#'; }
 /* 城市口径必须和 jobquery.city_of 一致：港澳台统一前缀，否则下拉选「中国香港」
    而数据里是「香港」，筛出来 0 条、导出也是 0 条，看起来像没岗位。 */
 const CITY_ALIAS={'香港':'中国香港','澳门':'中国澳门','台湾':'中国台湾'};
@@ -309,6 +312,8 @@ function norm(j){
     exp: labels.find(x=>/年|不限|应届|在校/.test(x)) || '',
     edu: labels.find(x=>/本科|大专|硕士|高中|学历不限|中专|初中/.test(x)) || '',
     active: j.boss_active_status || '',
+    /* 以 JD 实际内容为准：只信 has_jd 标记时，数据回填过的岗位会与导出/接口口径不符 */
+    hasJD: !!(j.jd || '').trim(),
     skillsArr: split(j.skills)
   };
 }
@@ -324,11 +329,13 @@ const med = mids.length ? statisticsMedian(mids) : 0;
 function statisticsMedian(a){ const b=[...a].sort((x,y)=>x-y); return b.length%2?b[(b.length-1)/2]:(b[b.length/2-1]+b[b.length/2])/2; }
 const activeN = rows.filter(j=>/刚刚活跃|在线|今日活跃/.test(j.active)).length;
 const companyN = new Set(rows.map(j=>j.boss_name)).size;
+/* 0 条数据时 rows.length 会让百分比变成非数字，页面直接印出「非数字%」——空数据也要能看 */
+const nRows = rows.length || 1;
 $('#cards').innerHTML = [
   ['c1','岗位总数',rows.length,'条'],
-  ['c2','JD 覆盖率',Math.round(rows.filter(j=>j.has_jd==='yes').length/rows.length*100),'%'],
+  ['c2','JD 覆盖率',Math.round(rows.filter(j=>j.hasJD).length/nRows*100),'%'],
   ['c3','薪资中位数',med.toFixed(1),'K'],
-  ['c4','Boss 近期活跃',Math.round(activeN/rows.length*100),'%'],
+  ['c4','Boss 近期活跃',Math.round(activeN/nRows*100),'%'],
   ['c1','覆盖公司',companyN,'家']
 ].map(([c,k,v,u])=>`<div class="card ${c}"><div class="k">${k}</div><div class="v">${v}<small> ${u}</small></div></div>`).join('');
 
@@ -418,10 +425,10 @@ function render(){
     const btn=done ? '<button class="rowbtn done">已招呼</button>'
       : `<button class="rowbtn" data-greet="${esc(j.job_id)}">打招呼</button>`;
     const main=`<tr class="row" data-id="${esc(j.job_id)}">
-      <td><a href="${esc(j.job_link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(j.title)}</a></td>
+      <td><a href="${esc(safeUrl(j.job_link))}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(j.title)}</a></td>
       <td class="sal">${esc(j.salary)}</td>
       <td>${esc(j.city)}</td><td>${esc(j.exp)}</td><td>${esc(j.edu)}</td>
-      <td class="co" title="${esc(j.boss_name)}"><a href="${esc(j.company_link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(j.boss_name)}</a></td>
+      <td class="co" title="${esc(j.boss_name)}"><a href="${esc(safeUrl(j.company_link))}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(j.boss_name)}</a></td>
       <td>${esc(j.company_scale)}</td>
       <td class="${/刚刚活跃|在线/.test(j.active)?'active':''}">${esc(j.active)}</td>
       <td>${skills}</td>
@@ -938,8 +945,13 @@ def main():
                     .replace("__TIME__", data.get("scraped_at", "")[:16]
                              if isinstance(data, dict) else ""))
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
+    # 原子写：服务每次请求都重读这个文件，直接覆盖会让浏览器拿到截断的 HTML
+    tmp = f"{args.output}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(html)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, args.output)
     print(f"OK {args.output} ({len(html)} bytes, {len(jobs)} jobs)")
 
 

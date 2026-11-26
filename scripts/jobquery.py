@@ -226,17 +226,24 @@ def stats(rows):
 
 
 def facets(rows):
-    """下拉选项（带条数）。选项与数据同源，避免出现「选了香港一条都没有」。"""
-    def cnt(field):
+    """下拉选项（带条数）。选项与数据同源，避免出现「选了香港一条都没有」。
+
+    福利是 `双休 | 五险一金` 这种多值串，必须拆开统计，否则选项会长成整串，
+    用户永远选不中单个福利。
+    """
+    def cnt(field, multi=False):
         c = {}
         for r in rows:
-            v = str(r.get(field) or "").strip()
-            if v:
-                c[v] = c.get(v, 0) + 1
+            vals = split_labels(r.get(field)) if multi else [r.get(field)]
+            for v in vals:
+                v = str(v or "").strip()
+                if v:
+                    c[v] = c.get(v, 0) + 1
         return dict(sorted(c.items(), key=lambda kv: (-kv[1], kv[0])))
 
-    return {k: cnt(k) for k in
-            ("city", "area", "exp", "edu", "scale", "active", "industry", "keyword")}
+    return {k: cnt(k, multi=(k == "welfare")) for k in
+            ("city", "area", "exp", "edu", "scale", "active", "industry",
+             "keyword", "welfare")}
 
 
 def load_master(output_dir, retries=3):
@@ -282,10 +289,36 @@ def load_ai_map(output_dir, jobs=None):
 
 
 def build_rows(jobs, ai_map=None):
+    """主表 → 查询行。按 job_id 去重，保留 JD 更完整的那条。
+
+    合并逻辑正常时不会有重复；但主表可能来自不同批次/手工合并，重复一条就会让
+    看板、导出、报告三处计数同时虚高，且没人知道多出来的是哪条。
+    """
     ai_map = ai_map or {}
-    rows = []
+    picked = {}
+    order = []
     for j in jobs:
-        known = ai_map.get(j.get("job_id"))
+        jid = str(j.get("job_id") or "")
+        if not jid:
+            order.append((jid, j))
+            continue
+        prev = picked.get(jid)
+        if prev is None:
+            picked[jid] = j
+            order.append((jid, j))
+            continue
+        # 同 id：JD 更长者胜，等长取更晚看到的
+        if (len(str(j.get("jd") or "")), str(j.get("last_seen") or "")) > \
+           (len(str(prev.get("jd") or "")), str(prev.get("last_seen") or "")):
+            picked[jid] = j
+            for i, (k, _v) in enumerate(order):
+                if k == jid:
+                    order[i] = (jid, j)
+                    break
+
+    rows = []
+    for jid, j in order:
+        known = ai_map.get(jid)
         if known:
             rows.append(normalize(j, is_ai=int(known[0] or 0), mid=known[1]))
         else:

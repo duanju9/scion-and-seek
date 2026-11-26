@@ -45,6 +45,25 @@ def _dt(v):
     return str(v or "")[:16].replace("T", " ")
 
 
+# Excel 单元格上限 32767 字符，超了会被静默截断（读回来少一截，没人知道为什么）。
+# 我们主动截并在文末标注，读者至少知道该点链接看原文。
+MAX_CELL = 32000
+CLIP_NOTE = "…（内容超长已截断，完整内容见岗位链接）"
+
+
+def _clip(s):
+    s = "" if s is None else str(s)
+    if len(s) <= MAX_CELL:
+        return s
+    cut = s[:MAX_CELL]
+    for sep in ("\n", "。", "；", "，"):
+        i = cut.rfind(sep)
+        if i > MAX_CELL * 0.8:
+            cut = cut[:i + 1]
+            break
+    return cut + CLIP_NOTE
+
+
 def _row_values(idx, r):
     return [
         idx, r["title"], r["company"], r["salary"], r["salary_mid"],
@@ -52,7 +71,7 @@ def _row_values(idx, r):
         r["skills"].replace(" | ", "、"),
         "是" if r["is_ai"] else "", r["exp"], r["edu"], r["active"],
         r["keyword"], _dt(r["first_seen"]), _dt(r["last_seen"]),
-        r["job_link"], r["jd"].strip(),
+        r["job_link"], _clip(r["jd"].strip()),
     ]
 
 
@@ -83,6 +102,10 @@ def build_xlsx(items, filters=None):
         row = ws.max_row
         for col in range(1, len(FIELDS) + 1):
             cell = ws.cell(row=row, column=col)
+            # openpyxl 把以 = 开头的字符串当公式写，JD 里出现 "=..." 时会变成公式；
+            # 强制回文本，值不变、不会再被 Excel 执行。
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.data_type = "s"
             cell.font, cell.border = body_font, border
             cell.alignment = Alignment(vertical="top", wrap_text=col in (11, 20))
         ws.cell(row=row, column=5).number_format = "0.0"
@@ -126,12 +149,18 @@ def build_xlsx(items, filters=None):
     return buf.getvalue()
 
 
+def _csv_safe(v):
+    """CSV 里以 = + - @ 开头的值会被 Excel 当公式执行，前面补一个单引号。"""
+    s = "" if v is None else str(v)
+    return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+
 def build_csv(items):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(FIELDS)
     for idx, r in enumerate(items, 1):
-        w.writerow(_row_values(idx, r))
+        w.writerow([_csv_safe(v) for v in _row_values(idx, r)])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
