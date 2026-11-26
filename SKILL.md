@@ -129,7 +129,23 @@ python "$S/generate_dashboard.py" \
 
 ### 第 7 步：联动工作台（推荐，统一展示入口）
 
-静态看板无法直接操作浏览器。用本地服务把**登录引导 + 对话记录 + 打招呼 + 岗位浏览**统一到一个页面：
+静态看板无法直接操作浏览器。用本地服务把**登录引导 + 对话记录 + 打招呼 + 岗位浏览**统一到一个页面。
+
+**一键启动（推荐）**：不用记上面那串参数，双击交付目录里的 `启动工作台.bat` 即可。它会依次做四件事：
+
+1. 检查 9222，没起就用**专用 profile** 拉起 Chrome（不动用户主 Chrome，登录态沿用 profile）；
+2. 检查 8765，没起就后台启动 `dashboard_server.py`（自动刷新 + 定时落库）；
+3. 轮询到 `/api/status` 返回后再打开页面，避免「打开就是未连接」；
+4. 启动看护进程：服务挂了重拉、CDP 掉了重开、超过两个周期没刷新就催一次。
+
+```bash
+python "$S/workbench.py" start    --output-dir "<交付目录>" --watchdog
+python "$S/workbench.py" status   --output-dir "<交付目录>"
+python "$S/workbench.py" stop     --output-dir "<交付目录>"
+python "$S/workbench.py" autostart --output-dir "<交付目录>"   # 开机静默自启（--off 取消）
+```
+
+看护只做三件事：拉起、重试、催刷新。**不发招呼、不开自动投递、不绕过验证码**；登录失效只记录并提示扫码。
 
 ```bash
 python "$S/dashboard_server.py" --port 8765 --cdp-port 9222 \
@@ -151,7 +167,9 @@ python "$S/dashboard_server.py" --port 8765 --cdp-port 9222 \
 - 自动投递栏：启用/关闭、立即投递、累计去重条数与进度；测试简历会被拒绝启用。
 - 看板 HTML 每次请求重读，重新生成看板无需重启服务。
 
-API：`/api/status`、`/api/login`、`/api/conversations`、`/api/messages?who=`、`/api/greet`、`/api/jobs`、`/api/trends`、`/api/refresh/status`、`/api/refresh`、`/api/auto-apply/status`、`/api/auto-apply`、`/api/auto-apply/config`、`/api/resume/status`、`/api/resume/upload`、`/api/resume/rematch`。浏览器类操作经 CDP；简历上传只落本地磁盘，不联网。
+API：`/api/status`、`/api/login`、`/api/conversations`、`/api/messages?who=`、`/api/greet`、`/api/jobs`、`/api/trends`、`/api/refresh/status`、`/api/refresh`、`/api/auto-apply/status`、`/api/auto-apply`、`/api/auto-apply/config`、`/api/resume/status`、`/api/resume/upload`、`/api/resume/rematch`、`/api/facets`、`/api/export.xlsx`。浏览器类操作经 CDP；简历上传只落本地磁盘，不联网。
+
+**查询与导出同一口径**：`jobquery.py` 是唯一实现，页面 JS、`/api/export.xlsx`、`/api/jobs?…` 都按它算。页面每次筛选后会拿同一组参数请求 `/api/jobs?count=1`，计数不一致就在「显示 N 条」处标红——两套实现一旦分叉会立刻暴露，而不是等导出后发现少了几条。`/api/facets` 给下拉选项（带条数，城市已按港澳台归一）。
 
 **静态预览 vs 工作台**：`present_files` 打开的是静态 HTML 预览（端口 9083 或 file://），没有本地服务，所有 fetch 都会失败，页面因此提示「未连接到本地服务」。必须打开 `http://127.0.0.1:8765/` 才是可上传简历、可刷新、可打招呼的工作台。
 
@@ -165,6 +183,9 @@ API：`/api/status`、`/api/login`、`/api/conversations`、`/api/messages?who=`
 7. 收件人校验不可省：发送前后各校验一次详情面板姓名区，防止误发。
 8. 登录/状态接口不要 attach 页面：`/api/status` 在刷新中直接返回缓存登录态；`/api/login` 只 `Target.activateTarget` 或用 `/json/new` 新开标签（刷新中优先新开，避免抢采集器页面），并 `Browser.setWindowBounds(normal)` 把窗口置前，否则聊天标签卡死时按钮会永远停在「正在打开…」。前端所有 API 必须带 `AbortController` 超时（普通 15s、上传 180s），并在 `finally` 恢复按钮文字；登录成功文案保持 8 秒，不被轮询覆盖。
 9. 自动刷新启动前先检查登录态；未登录不启动采集，避免采集器占着浏览器让用户打不开登录页。
+10. 筛选/排序只允许在 `jobquery.py` 里实现。页面、导出、API 三处各写一套时，「城市叫香港还是中国香港」「q 搜不搜行业」「薪资按上限还是中位排序」必然分叉——页面 42 条、导出 39 条，看起来却都对。
+11. 主表 2MB+，必须 `os.replace` 原子写；`json.dump` 直写期间读方会拿到半截 JSON（`JSONDecodeError`），表现为「偶尔打不开看板/导出失败」。
+12. 调度器的 `next_at` 不能只按 `last_ok_at` 算，否则一轮失败后页面会显示一个过去的「下次时间」；失败后也不要每 30 秒重试，按 5 分钟退避。
 
 ### 第 8 步：持续更新与行业岗位趋势（工作台默认开启）
 

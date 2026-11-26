@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
@@ -32,6 +33,25 @@ def _write_state(path, state):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def _cdp_ok(port):
+    """探一下 CDP 端口，用来区分「浏览器没了」和「采集被拦」。"""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _atomic_json(path, data, indent=2):
+    """同目录临时文件 + os.replace：避免读方拿到写了一半的 JSON。"""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -73,8 +93,9 @@ def backfill_from_previous(master_path, previous_path, csv_path,
             if not str(j.get(f) or "").strip() and mapping.get(jid, {}).get(f):
                 j[f] = mapping[jid][f]
                 filled += 1
-    with open(master_path, "w", encoding="utf-8") as fp:
-        json.dump(cur, fp, ensure_ascii=False, indent=2)
+    # 原子写：主表 5MB+，json.dump 期间 /api/jobs 与导出会读到半截 JSON。
+    # 先写同目录临时文件再 os.replace，读方要么看到旧版、要么看到新版。
+    _atomic_json(master_path, cur)
     # CSV 同步，避免两份数据不一致
     try:
         with open(csv_path, "w", encoding="utf-8-sig", newline="") as fp:
@@ -480,8 +501,15 @@ def _refresh_locked(cfg, state_path, state, log, now, run_keyword, all_keywords,
                      600, log)
         jobs_data = _load(tmp_jobs, {}) or {}
         jobs = jobs_data.get("jobs", []) if isinstance(jobs_data, dict) else jobs_data
-        if not ok or not jobs:
-            raise RuntimeError("列表采集失败或返回 0 条，已保留上次数据")
+        if not ok:
+            # 原始输出里往往只有 ConnectionReset，看不出是「浏览器没了」还是「被风控」。
+            # 先探一次 CDP，把判断写在错误里，省得下一轮又猜。
+            hint = "" if _cdp_ok(cfg["cdp_port"]) else "CDP 不可用（浏览器已退出或端口被占）："
+            tail = " | ".join(str(x) for x in log[-3:])[-260:]
+            raise RuntimeError(f"{hint}列表采集失败，已保留上次数据。最后输出：{tail}")
+        if not jobs:
+            raise RuntimeError("列表采集返回 0 条（登录态失效或触发风控），已保留上次数据；"
+                               "未做任何绕过尝试")
         log.append(f"列表 {len(jobs)} 条")
 
         # 2. 用当前主表的 JD 作为种子，避免重复抓；同时留一份供字段回填

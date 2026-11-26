@@ -73,6 +73,8 @@ input,select{background:var(--panel2);border:1px solid var(--line);color:var(--t
 input:focus,select:focus{border-color:var(--accent)}
 input[type=search]{min-width:260px}
 .count{color:var(--muted);font-size:12px;margin-left:auto;align-self:center}
+.count.bad{color:#c0392b;font-weight:600}
+.bad{color:#c0392b}
 .tblwrap{max-height:760px;overflow:auto;border:1px solid var(--line);border-radius:12px}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:32px}
 .empty{text-align:center;color:var(--muted);padding:30px}
@@ -292,11 +294,18 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 function split(v){ return String(v||'').split('|').map(x=>x.trim()).filter(Boolean); }
+/* 城市口径必须和 jobquery.city_of 一致：港澳台统一前缀，否则下拉选「中国香港」
+   而数据里是「香港」，筛出来 0 条、导出也是 0 条，看起来像没岗位。 */
+const CITY_ALIAS={'香港':'中国香港','澳门':'中国澳门','台湾':'中国台湾'};
 function norm(j){
   const labels = split(j.job_labels);
+  const parts = String(j.location||'').split('·');
+  const c0 = (parts[0]||'').trim();
   return {
     ...j,
-    city: String(j.location||'').split('·')[0].trim(),
+    city: CITY_ALIAS[c0] || c0,
+    area: parts.slice(1).join('·').trim(),
+    industry: j.company_industry || '',
     exp: labels.find(x=>/年|不限|应届|在校/.test(x)) || '',
     edu: labels.find(x=>/本科|大专|硕士|高中|学历不限|中专|初中/.test(x)) || '',
     active: j.boss_active_status || '',
@@ -354,36 +363,54 @@ $('#skillchips').innerHTML = counter('skillsArr',true,30).map(([k,v],i)=>
   `<span class="chip ${i<6?'hot':''}">${esc(k)}<b>${v}</b></span>`).join('');
 
 // 筛选器
-function fillSel(id, vals){ const el=$(id); vals.forEach(v=>{ const o=document.createElement('option');o.value=v;o.textContent=v;el.appendChild(o);}); }
-fillSel('#fexp', [...new Set(rows.map(j=>j.exp).filter(Boolean))].sort());
-fillSel('#fedu', [...new Set(rows.map(j=>j.edu).filter(Boolean))].sort());
-fillSel('#fcity', [...new Set(rows.map(j=>j.city).filter(Boolean))].sort());
-fillSel('#fscale', [...new Set(rows.map(j=>j.company_scale).filter(Boolean))].sort());
-fillSel('#factive', [...new Set(rows.map(j=>j.active).filter(Boolean))].sort());
-
+/* 下拉选项：优先用服务端的 facets（带条数、城市已归一）；
+   服务端起不来（比如直接双击 HTML）就退回本地去重，功能不残废。 */
+function fillSel(id, vals, counts){
+  const el=$(id);
+  vals.forEach(v=>{
+    const o=document.createElement('option');
+    o.value=v;
+    o.textContent = counts && counts[v] ? `${v} (${counts[v]})` : v;
+    el.appendChild(o);
+  });
+}
+/* 下拉在用 facets 填充（见文件末尾 initFilters），此处只定义渲染函数 */
 let sortKey='salary', sortDir=-1, openId=null;
+/* 与 jobquery.match 同一套：q 命中 标题/公司/城市/区域/技能/行业/JD */
 function filtered(){
   const q=$('#q').value.trim().toLowerCase();
   const f=[['#fexp','exp'],['#fedu','edu'],['#fcity','city'],['#fscale','company_scale'],['#factive','active']];
   return rows.filter(j=>{
     for(const [sel,key] of f){ const v=$(sel).value; if(v && j[key]!==v) return false; }
     if(!q) return true;
-    return [j.title,j.company,j.boss_name,j.city,j.skills,j.jd].some(x=>String(x||'').toLowerCase().includes(q));
+    return [j.title,j.boss_name,j.city,j.area,j.skills,j.welfare,j.industry,j.jd]
+      .some(x=>String(x||'').toLowerCase().includes(q));
   });
 }
+/* 薪资按中位（与导出一致），不是上限；未知薪资由调用方压到最后 */
+function midOf(s){ const m=String(s||'').match(/(\d+)-(\d+)K/); return m?(Number(m[1])+Number(m[2]))/2:null; }
 function val(j,k){
   if(k==='company') return j.boss_name;
   if(k==='skills') return j.skills;
   if(k==='active') return j.active;
-  if(k==='salary'){ const m=String(j.salary).match(/(\d+)-(\d+)K/); return m?Number(m[2]):0; }
+  if(k==='salary') return midOf(j.salary);
   return j[k]||'';
 }
 function render(){
   let list=filtered();
-  list.sort((a,b)=>{ const x=val(a,sortKey),y=val(b,sortKey);
-    return (typeof x==='number' ? x-y : String(x).localeCompare(String(y),'zh'))*sortDir; });
+  list.sort((a,b)=>{
+    const x=val(a,sortKey), y=val(b,sortKey);
+    const xe=(x===null||x===''||x===undefined), ye=(y===null||y===''||y===undefined);
+    if(xe&&ye) return 0;
+    if(xe) return 1;          // 空值恒排最后，升降序都一样
+    if(ye) return -1;
+    const d = (typeof x==='number') ? x-y
+      : (String(x)<String(y) ? -1 : String(x)>String(y) ? 1 : 0);
+    return d*sortDir;
+  });
   $('#cnt').textContent=`显示 ${list.length} / ${rows.length} 条`;
   $('#btnExport').textContent=`导出 Excel（${list.length} 条）`;
+  checkParity(list.length);
   if(!list.length){ $('#tbody').innerHTML='<tr><td colspan="10" class="empty">没有匹配的岗位</td></tr>'; return; }
   $('#tbody').innerHTML=list.map(j=>{
     const skills=j.skillsArr.slice(0,4).map(s=>`<span class="pill ${/Python|大模型|机器学习|深度学习|算法工程化/.test(s)?'hi':''}">${esc(s)}</span>`).join('');
@@ -418,15 +445,42 @@ $('#tbody').addEventListener('click',async e=>{
 
 /* 导出：把当前筛选 + 排序带给服务端，现读主表生成 Excel（中文表头）。
    导出内容 = 眼前这批，不是整库；定时刷新后不用重新生成任何模板。 */
-$('#btnExport').addEventListener('click',()=>{
+function exportParams(){
   const p=new URLSearchParams();
   [['#q','q'],['#fexp','exp'],['#fedu','edu'],['#fcity','city'],
    ['#fscale','scale'],['#factive','active']].forEach(([sel,k])=>{
     const v=$(sel).value.trim(); if(v) p.set(k,v);
   });
   p.set('sort',sortKey); p.set('dir',sortDir>0?'asc':'desc');
-  window.location.href='/api/export.xlsx?'+p.toString();
+  return p;
+}
+$('#btnExport').addEventListener('click',()=>{
+  window.location.href='/api/export.xlsx?'+exportParams().toString();
 });
+
+/* 口径自检：页面数出来的条数 vs 服务端按同一组参数数的条数。
+   两套实现一旦分叉（只改了前端、或只改了导出），这里立刻标红，
+   不用等导出 Excel 才发现少了几条。 */
+let parityTimer=null;
+function checkParity(n){
+  if(!IN_WORKBENCH) return;
+  clearTimeout(parityTimer);
+  parityTimer=setTimeout(async()=>{
+    try{
+      const p=exportParams(); p.set('count','1');
+      const r=await (await fetch('/api/jobs?'+p.toString())).json();
+      if(!r||r.ok===false) return;
+      const el=$('#cnt');
+      if(Number(r.count)!==Number(n)){
+        el.textContent=`显示 ${n} 条 · 导出 ${r.count} 条 · 口径不一致`;
+        el.classList.add('bad');
+        el.title='页面与服务端筛选结果不同，导出会拿到另一批数据';
+      }else{
+        el.classList.remove('bad'); el.title='';
+      }
+    }catch(e){}
+  },500);
+}
 
 /* 账号指纹：换号只提示、不改数据；判断依据是登录 cookie 的哈希，不落原文 */
 async function pollAccount(){
@@ -448,7 +502,25 @@ async function pollAccount(){
   }catch(e){}
 }
 
-render();
+/* 初始化筛选器：先取 facets（带条数），失败就本地去重兜底；最后统一渲染一次 */
+(async()=>{
+  let f=null;
+  if(IN_WORKBENCH){
+    try{ const r=await (await fetch('/api/facets')).json(); if(r&&r.ok) f=r.facets; }catch(e){}
+  }
+  const local=k=>{
+    const m={};
+    rows.forEach(j=>{ const v=j[k]; if(v) m[v]=(m[v]||0)+1; });
+    return m;
+  };
+  const keys=o=>Object.keys(o).sort((a,b)=>o[b]-o[a]||(a<b?-1:1));
+  [['#fexp','exp'],['#fedu','edu'],['#fcity','city'],['#fscale','company_scale'],['#factive','active']]
+    .forEach(([sel,key])=>{
+      const src = f ? (f[key==='company_scale'?'scale':key]||{}) : local(key);
+      fillSel(sel, keys(src), src);
+    });
+  render();
+})();
 
 /* ===== 行业岗位趋势：快照时间序列 / 环比 / 新增岗位 ===== */
 function dcls(v){ return Number(v)>0?'up-d':(Number(v)<0?'down-d':'flat-d'); }
@@ -663,7 +735,11 @@ async function pollRefresh(){
     const s=await API('/api/refresh/status');
     const bits=[];
     if(s.last_ok_at) bits.push('最后更新 <b>'+esc(s.last_ok_at)+'</b>');
-    if(s.next_at && s.status!=='running') bits.push('下次自动刷新 '+esc(s.next_at.slice(11,16)));
+    if(s.next_at && s.status!=='running')
+      bits.push(s.overdue ? '<span class="bad">自动刷新已到期，等待登录/CDP 恢复</span>'
+                          : '下次自动刷新 '+esc(s.next_at.slice(11,16)));
+    if(s.status==='error' && s.error)
+      bits.push('<span class="bad">上次失败 '+esc(String(s.error).slice(0,36))+'</span>');
     if(s.snapshot_count) bits.push('已留档 '+s.snapshot_count+' 期');
     $('#updatetime').innerHTML=bits.join(' · ')||esc(s.msg||'等待首次刷新');
     const last=(s.steps||[]).filter(x=>x.startsWith('[')).slice(-1)[0]||'';
@@ -671,7 +747,12 @@ async function pollRefresh(){
       $('#refreshmsg').innerHTML='<span class="pulse"></span>'+esc(last||'正在刷新…');
       refreshing=true; $('#btnRefresh').disabled=true;
     }else{
-      if(refreshing){ $('#refreshmsg').textContent=s.status==='ok'?'刷新完成':'刷新失败：'+(s.error||''); refreshing=false; }
+      if(s.status==='error'){
+        $('#refreshmsg').innerHTML='<span class="bad">刷新失败：'+esc(String(s.error||'').slice(0,140))+'</span>';
+        refreshing=false;
+      }else if(refreshing){
+        $('#refreshmsg').textContent='刷新完成'; refreshing=false;
+      }
       $('#btnRefresh').disabled=false;
     }
     if(s.data_version){

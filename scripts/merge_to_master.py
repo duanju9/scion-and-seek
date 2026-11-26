@@ -160,8 +160,13 @@ def main():
         "carried": carried,
         "expired": expired,
     }
-    with open(args.out_json, "w", encoding="utf-8") as f:
+    # 原子写：看板与导出随时可能读到这份文件，不能出现半截 JSON
+    tmp = f"{args.out_json}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(dict(meta, jobs=rows), f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, args.out_json)
 
     with open(args.out_csv, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(FIELD_ORDER))

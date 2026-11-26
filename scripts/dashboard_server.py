@@ -41,6 +41,9 @@ from urllib.parse import urlparse, parse_qs, unquote, quote
 from urllib.request import Request, urlopen
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)  # 让 export_jobs / jobquery 这类同目录模块可被普通 import
+import jobquery  # noqa: E402
 spec = importlib.util.spec_from_file_location("boss_cdp_raw", os.path.join(HERE, "boss_cdp_raw.py"))
 boss = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(boss)
@@ -677,15 +680,29 @@ class RefreshManager:
             return None
 
     def _next_at(self, st):
+        """下次时间 = 最近一次「尝试」+ 间隔。
+
+        以前只认 last_ok_at：一轮失败后 next_at 会退回到上一个成功点之前，
+        页面上出现「下次 06:31」而当时已经 12:59——不是小瑕疵，是让人以为调度坏了。
+        """
         if self.interval <= 0:
             return ""
-        base = self._parse(st.get("last_ok_at")) or datetime.datetime.now()
+        base = None
+        for key in ("last_ok_at", "finished_at", "started_at"):
+            d = self._parse(st.get(key))
+            if d and (base is None or d > base):
+                base = d
+        base = base or datetime.datetime.now()
         return (base + datetime.timedelta(minutes=self.interval)).strftime("%Y-%m-%d %H:%M:%S")
 
     def status(self):
         st = self._read()
         st["interval_minutes"] = self.interval
         st["next_at"] = self._next_at(st)
+        st["last_attempt_at"] = st.get("finished_at") or st.get("started_at") or ""
+        nxt = self._parse(st["next_at"])
+        st["overdue"] = bool(nxt and nxt < datetime.datetime.now()
+                             and st.get("status") != "running")
         st["msg"] = st.get("error", "") if st.get("status") == "error" else ""
         return st
 
@@ -719,8 +736,12 @@ class RefreshManager:
             # 进程被强杀会留下 running 残状态：超过 15 分钟视为卡死，允许重试
             start = self._parse(st.get("started_at"))
             return start is not None and (now - start).total_seconds() >= 15 * 60
-        last = self._parse(st.get("last_ok_at"))
-        return last is None or (now - last).total_seconds() >= self.interval * 60
+        last_ok = self._parse(st.get("last_ok_at"))
+        if st.get("status") == "error":
+            # 失败后 5 分钟再试（CDP 掉线时立刻重试只会连刷失败记录）
+            last_try = self._parse(st.get("finished_at")) or last_ok
+            return last_try is None or (now - last_try).total_seconds() >= 5 * 60
+        return last_ok is None or (now - last_ok).total_seconds() >= self.interval * 60
 
     def _can_refresh(self):
         """未登录时不启动自动刷新，避免采集器占着浏览器让登录页打不开。"""
@@ -923,8 +944,23 @@ def make_handler(port, html_path, manager=None, output_dir=None, apply_manager=N
                         self._send(dict(account_probe.load_state(out) or {"known": False},
                                         error=str(e)))
             elif u.path in ("/api/trends", "/api/jobs"):
+                out = output_dir or os.path.dirname(html_path or "")
+                if u.path == "/api/jobs" and u.query:
+                    # 带参数时走统一查询层，页面用它校验「我数出来的条数」和
+                    # 「导出会拿到的条数」是否一致；不一致就是口径又分叉了。
+                    qs = parse_qs(u.query)
+                    try:
+                        if str((qs.get("count") or [""])[0]).lower() in ("1", "true", "yes"):
+                            self._send({"ok": True, "count": export_jobs.count(qs, out)})
+                        else:
+                            rows, _f, st = jobquery.query(out, params=qs)
+                            self._send({"ok": True, "count": len(rows), "stats": st,
+                                        "jobs": [r["raw"] for r in rows]})
+                    except Exception as e:
+                        self._send({"ok": False, "msg": f"查询失败：{e}"}, status=500)
+                    return
                 name = "trends.json" if u.path == "/api/trends" else "岗位公司信息_含JD.json"
-                path = os.path.join(output_dir or os.path.dirname(html_path or ""), name)
+                path = os.path.join(out, name)
                 data = None
                 try:
                     with open(path, encoding="utf-8") as f:
@@ -933,6 +969,16 @@ def make_handler(port, html_path, manager=None, output_dir=None, apply_manager=N
                     data = None
                 self._send(data if data is not None else
                            {"ok": False, "msg": f"尚未生成 {name}"})
+            elif u.path == "/api/facets":
+                # 下拉选项与条数：城市已按港澳台口径归一，不会再出现「选了香港 0 条」
+                out = output_dir or os.path.dirname(html_path or "")
+                try:
+                    rows = jobquery.build_rows(jobquery.load_master(out),
+                                               jobquery.load_ai_map(out))
+                    self._send({"ok": True, "count": len(rows),
+                                "facets": jobquery.facets(rows)})
+                except Exception as e:
+                    self._send({"ok": False, "msg": f"读取失败：{e}"}, status=500)
             else:
                 self._send({"error": "not found"}, status=404)
 
