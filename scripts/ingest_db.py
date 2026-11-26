@@ -47,6 +47,16 @@ def is_ai(job):
     return 1 if AI_RE.search(text) else 0
 
 
+def ensure_account_column(conn):
+    """snapshots.account：换号时段可分辨，趋势里「岗位数骤降」才能区分是换号还是行情。
+
+    老库没有这列，用 ALTER 补；只加列不重建表，历史行 account 留空（未知就是未知）。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(snapshots)")}
+    if "account" not in cols:
+        conn.execute("ALTER TABLE snapshots ADD COLUMN account TEXT")
+
+
 def init_db(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS jobs (
@@ -76,8 +86,7 @@ def init_db(conn):
       salary_mid REAL,
       active_rate REAL,
       source TEXT
-    );
-    CREATE TABLE IF NOT EXISTS runs (
+    );    CREATE TABLE IF NOT EXISTS runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_at TEXT,
       kind TEXT,
@@ -87,6 +96,7 @@ def init_db(conn):
       notes TEXT
     );
     """)
+    ensure_account_column(conn)
 
 
 def upsert_jobs(conn, jobs, stamp):
@@ -138,24 +148,36 @@ def insert_history(conn, trends):
               s.get("salary_mid"), s.get("active_rate"), "trends"))
 
 
-def insert_snapshot(conn, data, jobs, trends, label):
+def insert_snapshot(conn, data, jobs, trends, label, account=""):
     latest = (trends or {}).get("latest") or {}
     jd_count = sum(1 for j in jobs if str(j.get("jd") or "").strip())
     ai_count = sum(is_ai(j) for j in jobs)
     ts = (data.get("scraped_at") if isinstance(data, dict) else "") or now()
     ts = str(ts)[:19].replace("T", " ")
     conn.execute("""
-    INSERT INTO snapshots (ts,job_count,jd_count,ai_count,salary_mid,active_rate,source)
-    VALUES (?,?,?,?,?,?,?)
+    INSERT INTO snapshots (ts,job_count,jd_count,ai_count,salary_mid,active_rate,source,account)
+    VALUES (?,?,?,?,?,?,?,?)
     ON CONFLICT(ts) DO UPDATE SET
       job_count=excluded.job_count, jd_count=excluded.jd_count,
       ai_count=excluded.ai_count, salary_mid=excluded.salary_mid,
-      active_rate=excluded.active_rate, source=excluded.source
+      active_rate=excluded.active_rate, source=excluded.source,
+      -- 这一轮没探到账号时保留旧值，别把已知账号刷成空
+      account=COALESCE(excluded.account, account)
     """, (ts, len(jobs), jd_count, ai_count,
           latest.get("salary_mid") or sum(salary_mid(j.get("salary")) or 0 for j in jobs) /
           max(1, sum(1 for j in jobs if salary_mid(j.get("salary")))),
-          latest.get("active_rate"), label))
+          latest.get("active_rate"), label, account or None))
     return ts
+
+
+def read_account_label(db_path):
+    """账号标签由 account_probe.py 写在同一目录的 account_state.json，读不到就留空。"""
+    path = os.path.join(os.path.dirname(os.path.abspath(db_path)), "account_state.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return str((json.load(f) or {}).get("label") or "")
+    except Exception:
+        return ""
 
 
 def summary(conn):
@@ -190,13 +212,14 @@ def main():
         stamp = now()
         n = upsert_jobs(conn, jobs, stamp)
         insert_history(conn, trends)
-        ts = insert_snapshot(conn, data, jobs, trends, args.label)
+        account = read_account_label(args.db)
+        ts = insert_snapshot(conn, data, jobs, trends, args.label, account)
         s = summary(conn)
         conn.execute("INSERT INTO runs (run_at,kind,total,ai_count,jd_count,notes) VALUES (?,?,?,?,?,?)",
                      (stamp, args.label, n, s["ai_jobs"], s["jd_jobs"], ts))
         conn.commit()
         s.update({"ok": True, "upserted": n, "db": args.db,
-                  "snapshot_ts": ts, "run_at": stamp})
+                  "snapshot_ts": ts, "run_at": stamp, "account": account})
     finally:
         conn.close()
     print(json.dumps(s, ensure_ascii=False, indent=2))

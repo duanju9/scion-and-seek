@@ -56,15 +56,20 @@ def prior_snapshot(patrol_dir):
     return "", ""
 
 
-def health_errors(status):
+def health_errors(status, reachable=True):
     """runbook 的 cdp_down / login_required 落成可判定的错误。
 
     只把健康态写进 log["health"] 等于没有判定：Chrome 关掉或登录过期时本轮一条数据都采不到，
     数据全旧却仍然 status=ok，整夜静默停摆。
+    但「探测卡住」不等于「浏览器没开」：cdp=None 表示状态未知，不判错（#26）。
     """
+    if not reachable:
+        return []  # 服务都连不上，already 记了 server unreachable，别叠一条 cdp_down
     st = status or {}
-    if not st.get("cdp"):
+    if st.get("cdp") is False:
         return ["cdp_down：CDP 不可用，本轮无在线采集（未尝试重启 Chrome、未尝试登录）"]
+    if st.get("cdp") is None:
+        return []
     if not st.get("logged_in"):
         return ["login_required：Boss 未登录，已跳过在线采集（未扫码、未绕过验证码）"]
     return []
@@ -229,19 +234,49 @@ def main():
     log = {"run_at": stamp, "health": {}, "refresh": {}, "db": {},
            "api": {}, "tests": {}, "advice": {}, "errors": []}
 
+    reachable = True
     try:
         status = api(args.base, "/api/status", timeout=15)
     except Exception as e:
+        reachable = False
         log["errors"].append(f"server unreachable: {e}")
         if args.start_server and maybe_start_server(args):
             try:
                 status = api(args.base, "/api/status", timeout=15)
+                reachable = True
             except Exception as e2:
                 status = {"cdp": False, "logged_in": False, "message": str(e2)}
         else:
             status = {"cdp": False, "logged_in": False, "message": "server unreachable"}
     log["health"]["status"] = status
-    log["errors"].extend(health_errors(status))
+    log["errors"].extend(health_errors(status, reachable))
+    if (status or {}).get("timeout"):
+        log["warnings"] = list(log.get("warnings") or []) + [
+            "状态探测超时：本轮不判定在线/离线，数据可用性以刷新结果为准"]
+
+    # 账号指纹：换号必须留痕，否则「这批岗位是哪个号抓的」只能靠猜。
+    # 刷新期间浏览器被采集器占着，不去抢 CDP，宁可本轮记为未知。
+    account = {}
+    busy = False
+    try:
+        busy = api(args.base, "/api/refresh/status", timeout=8).get("status") == "running"
+    except Exception:
+        pass
+    if not busy:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import account_probe
+            account = account_probe.observe(args.output_dir, args.cdp_port)
+        except Exception as e:
+            account = {"known": False, "probe_error": f"探测失败：{e}"[:160]}
+    else:
+        account = {"known": False, "probe_error": "刷新进行中，跳过本轮账号探测"}
+    log["account"] = account
+    if account.get("switched"):
+        ev = account.get("switch") or {}
+        log["warnings"] = list(log.get("warnings") or []) + [
+            f"账号切换：{ev.get('from_label')} → {ev.get('to_label')}（{ev.get('at')}），"
+            f"本轮起数据记在新账号名下，历史岗位不回写"]
 
     refresh_state = {}
     if not args.no_refresh:
@@ -289,8 +324,9 @@ def main():
                                 backlog=int(log["refresh"].get("jd_missing") or 0))
     log["checks"]["prev_patrol"] = prev_file
     if log["checks"].get("ok"):
-        # 上限模式的积压说明只是提示，不该把整轮判成失败
-        log["warnings"] = ["data check: " + n for n in log["checks"]["notes"]]
+        # 上限模式的积压说明只是提示，不该把整轮判成失败；账号切换等既有 warning 要保留
+        log["warnings"] = list(log.get("warnings") or []) + [
+            "data check: " + n for n in log["checks"]["notes"]]
     else:
         for note in log["checks"]["notes"]:
             log["errors"].append("data check: " + note)

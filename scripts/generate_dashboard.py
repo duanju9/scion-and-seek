@@ -83,6 +83,9 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:32px}
 .dot.on{background:var(--green);box-shadow:0 0 10px #34d39966}
 .dot.off{background:#ef4444;box-shadow:0 0 10px #ef444466}
 .loginbar .msg{color:var(--muted);font-size:13px;flex:1;min-width:180px}
+.acct{font-size:12px;padding:4px 9px;border-radius:999px;border:1px solid #24406b;background:#14233c;color:#9fc4ff;white-space:nowrap}
+.acct[data-k="0"]{color:var(--muted);border-color:var(--line);background:transparent}
+.acct[data-sw="1"]{color:#fbbf24;border-color:#7a5a13;background:#241c07}
 .resumebar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 18px;margin-bottom:18px;
   border:1px solid #24406b;border-radius:12px;background:linear-gradient(100deg,#101f38,#0c1424)}
 .resumebar .ricon{width:40px;height:40px;border-radius:10px;background:#17304a;color:var(--cyan);
@@ -180,6 +183,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:32px}
 <div class="loginbar" id="loginbar">
   <span class="dot" id="dot"></span>
   <span class="msg" id="loginmsg">正在检测浏览器与登录状态…</span>
+  <span class="acct" id="acct" data-k="0" title="当前登录账号的 cookie 指纹，换号会在这里变">账号：检测中</span>
   <button class="btn ghost sm" id="btnStatus">刷新状态</button>
   <button class="btn" id="btnLogin">打开登录页 / 引导登录</button>
 </div>
@@ -258,6 +262,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:32px}
     <select id="fcity"><option value="">全部城市</option></select>
     <select id="fscale"><option value="">全部规模</option></select>
     <select id="factive"><option value="">全部活跃度</option></select>
+    <button class="btn sm" id="btnExport" title="按当前筛选条件导出，中文表头，Excel 直接打开">导出 Excel</button>
     <span class="count" id="cnt"></span>
   </div>
   <div class="tblwrap">
@@ -378,6 +383,7 @@ function render(){
   list.sort((a,b)=>{ const x=val(a,sortKey),y=val(b,sortKey);
     return (typeof x==='number' ? x-y : String(x).localeCompare(String(y),'zh'))*sortDir; });
   $('#cnt').textContent=`显示 ${list.length} / ${rows.length} 条`;
+  $('#btnExport').textContent=`导出 Excel（${list.length} 条）`;
   if(!list.length){ $('#tbody').innerHTML='<tr><td colspan="10" class="empty">没有匹配的岗位</td></tr>'; return; }
   $('#tbody').innerHTML=list.map(j=>{
     const skills=j.skillsArr.slice(0,4).map(s=>`<span class="pill ${/Python|大模型|机器学习|深度学习|算法工程化/.test(s)?'hi':''}">${esc(s)}</span>`).join('');
@@ -409,6 +415,39 @@ $('#tbody').addEventListener('click',async e=>{
 ['#q','#fexp','#fedu','#fcity','#fscale','#factive'].forEach(s=>{
   $(s).addEventListener(s==='#q'?'input':'change',()=>{openId=null;render();});
 });
+
+/* 导出：把当前筛选 + 排序带给服务端，现读主表生成 Excel（中文表头）。
+   导出内容 = 眼前这批，不是整库；定时刷新后不用重新生成任何模板。 */
+$('#btnExport').addEventListener('click',()=>{
+  const p=new URLSearchParams();
+  [['#q','q'],['#fexp','exp'],['#fedu','edu'],['#fcity','city'],
+   ['#fscale','scale'],['#factive','active']].forEach(([sel,k])=>{
+    const v=$(sel).value.trim(); if(v) p.set(k,v);
+  });
+  p.set('sort',sortKey); p.set('dir',sortDir>0?'asc':'desc');
+  window.location.href='/api/export.xlsx?'+p.toString();
+});
+
+/* 账号指纹：换号只提示、不改数据；判断依据是登录 cookie 的哈希，不落原文 */
+async function pollAccount(){
+  if(!IN_WORKBENCH) return;
+  try{
+    const a=await (await fetch('/api/account')).json();
+    const el=$('#acct');
+    if(!a || !a.known){
+      el.textContent='账号：未识别'; el.dataset.k='0';
+      el.title=a&&(a.probe_error||a.msg)?(a.probe_error||a.msg):'CDP 未连接，无法读取登录 cookie';
+      return;
+    }
+    const sw=(a.switches||[]).slice(-1)[0];
+    const freshly = sw && sw.to_label===a.label &&
+      (Date.now()-new Date(sw.at.replace(' ','T')).getTime())<36*3600*1000;
+    el.dataset.k='1'; el.dataset.sw=freshly?'1':'0';
+    el.textContent=`账号 ${String(a.label).replace('账号','')}`+(freshly?` · 已换号 ${String(sw.at).slice(5,16)}`:'');
+    el.title=`指纹 ${a.key} · 自 ${a.since}`+(a.switched?' · 本轮检测到换号':'')+` · 历史换号 ${(a.switches||[]).length} 次`;
+  }catch(e){}
+}
+
 render();
 
 /* ===== 行业岗位趋势：快照时间序列 / 环比 / 新增岗位 ===== */
@@ -764,10 +803,12 @@ if(IN_WORKBENCH){
   pollRefresh();
   pollApply();
   pollResume();
+  pollAccount();
   setInterval(refreshStatus, 60000);
   setInterval(pollRefresh, 8000);
   setInterval(pollApply, 8000);
   setInterval(pollResume, 30000);
+  setInterval(pollAccount, 300000);
 }
 </script>
 </body>

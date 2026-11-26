@@ -50,6 +50,12 @@ spec2.loader.exec_module(refresh_data)
 spec3 = importlib.util.spec_from_file_location("auto_apply", os.path.join(HERE, "auto_apply.py"))
 auto_apply = importlib.util.module_from_spec(spec3)
 spec3.loader.exec_module(auto_apply)
+spec4 = importlib.util.spec_from_file_location("export_jobs", os.path.join(HERE, "export_jobs.py"))
+export_jobs = importlib.util.module_from_spec(spec4)
+spec4.loader.exec_module(export_jobs)
+spec5 = importlib.util.spec_from_file_location("account_probe", os.path.join(HERE, "account_probe.py"))
+account_probe = importlib.util.module_from_spec(spec5)
+spec5.loader.exec_module(account_probe)
 
 # 所有 CDP 操作共用同一把锁：刷新、投递、手动打招呼互不抢页面
 CDP_GATE = threading.Lock()
@@ -241,6 +247,22 @@ def find_page(cdp, url_part, timeout=5):
     return None, None
 
 
+def detach(cdp, *sids):
+    """显式 detach 页面会话。
+
+    attachToTarget 出来的会话不会因为 websocket 关闭就消失，会一直挂在 Chrome 上；
+    看板每分钟轮询状态、巡检每轮再探一次，会话只增不减，几小时后浏览器就被拖到不响应
+    （表现就是 Runtime.evaluate 一直不返回、/api/status 超时）。
+    """
+    for s in sids:
+        if not s:
+            continue
+        try:
+            cdp.send("Target.detachFromTarget", {"sessionId": s}, timeout=2)
+        except Exception:
+            pass
+
+
 def eval_fast(cdp, js, sid, timeout=4):
     r = cdp.send("Runtime.evaluate", {"expression": js, "returnByValue": True},
                  sid, timeout=timeout)
@@ -291,6 +313,53 @@ def click_by_text(cdp, sid, keyword):
     return keyword in selected_text(cdp, sid)
 
 
+_STATUS_PROBE_LOCK = threading.Lock()
+_STATUS_CACHE = {"at": 0.0, "value": None}
+
+
+def api_status_guarded(port, manager=None, timeout=8):
+    """给 /api/status 加硬超时。
+
+    CDP 的 Runtime.evaluate 在页面被节流/挂住时不返回，find_page + eval 能一路挂到几十秒，
+    HTTP 请求与巡检的健康检查就一起超时，最后被记成「server unreachable / cdp_down」——
+    明明是「探测卡住」，却报成「浏览器没开」。这里超时就返回明确的三态：cdp=None。
+
+    另外用一把非阻塞锁保证同一时刻只有一个探测线程：否则页面一直卡着时，
+    每分钟一次的轮询会不断堆积僵尸线程。
+    """
+    if not _STATUS_PROBE_LOCK.acquire(blocking=False):
+        cached = _STATUS_CACHE.get("value") or {}
+        return dict(cached, stale=True,
+                    message="上一次状态探测仍未返回（CDP 页面卡住），先沿用缓存；"
+                            "可在 Chrome 里刷新/重开标签页后恢复")
+
+    box = {}
+
+    def work():
+        try:
+            box["value"] = api_status(port, manager)
+        except Exception as e:  # noqa: BLE001 - 探测失败要降级而不是抛给调用方
+            box["error"] = e
+        finally:
+            try:
+                _STATUS_PROBE_LOCK.release()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return {"cdp": None, "logged_in": None, "has_chat": None, "timeout": True,
+                "message": f"状态探测 {timeout}s 未返回（CDP 页面无响应），本次不判定在线/离线"}
+    if "error" in box:
+        return {"cdp": None, "logged_in": None, "has_chat": None, "timeout": False,
+                "message": f"状态探测异常：{box['error']}"}
+    value = box.get("value") or {}
+    _STATUS_CACHE.update({"at": time.time(), "value": value})
+    return value
+
+
 def api_status(port, manager=None):
     result = {"cdp": False, "logged_in": False, "has_chat": False,
               "message": "", "profile": "~/.boss-zhipin-scraper/chrome-profile"}
@@ -307,12 +376,14 @@ def api_status(port, manager=None):
         result["message"] = f"CDP 未启动：{e}"
         return result
     chat_sid = None
+    jobs_sid = None
     try:
         result["cdp"] = True
         tid, sid = find_page(cdp, "web/geek/chat", timeout=5)
         if not tid:
             # 没有聊天页时用职位页判断登录态，避免自动刷新永远不启动
             jtid, jsid = find_page(cdp, "web/geek/jobs", timeout=5)
+            jobs_sid = jsid
             if jtid:
                 txt = eval_fast(cdp, "document.body.innerText", jsid, timeout=4) or ""
                 result["logged_in"] = ("登录/注册" not in txt and
@@ -339,6 +410,7 @@ def api_status(port, manager=None):
     except Exception as e:
         result["message"] = f"状态检查失败：{e}"
     finally:
+        detach(cdp, chat_sid, jobs_sid)
         cdp.close()
     return result
 
@@ -400,6 +472,7 @@ def api_conversations(port):
         cdp = cdp_connect(port)
     except Exception as e:
         return {"ok": False, "msg": str(e), "items": []}
+    sid = None
     try:
         tid, sid = find_page(cdp, "web/geek/chat")
         if not tid:
@@ -418,6 +491,7 @@ def api_conversations(port):
     except Exception as e:
         return {"ok": False, "msg": f"聊天页无响应：{e}", "items": []}
     finally:
+        detach(cdp, sid)
         cdp.close()
 
 
@@ -456,6 +530,7 @@ def api_messages(port, who):
         cdp = cdp_connect(port)
     except Exception as e:
         return {"ok": False, "msg": str(e), "messages": []}
+    sid = None
     try:
         tid, sid = find_page(cdp, "web/geek/chat")
         if not tid:
@@ -513,6 +588,7 @@ def api_messages(port, who):
     except Exception as e:
         return {"ok": False, "msg": f"聊天页无响应：{e}", "messages": []}
     finally:
+        detach(cdp, sid)
         cdp.close()
 
 
@@ -795,7 +871,7 @@ def make_handler(port, html_path, manager=None, output_dir=None, apply_manager=N
                     page = page.encode("utf-8")
                 self._send(page, ctype="text/html; charset=utf-8")
             elif u.path == "/api/status":
-                self._send(api_status(port, manager))
+                self._send(api_status_guarded(port, manager))
             elif u.path == "/api/conversations":
                 if manager and manager.is_running():
                     self._send({"ok": False, "msg": "数据刷新中，会话列表稍后自动恢复", "items": []})
@@ -815,6 +891,37 @@ def make_handler(port, html_path, manager=None, output_dir=None, apply_manager=N
                            {"enabled": False, "status": "offline", "msg": "未启用自动投递"})
             elif u.path == "/api/resume/status":
                 self._send(resume_status(output_dir))
+            elif u.path in ("/api/export.xlsx", "/api/export.csv"):
+                # 现读主表再导出：定时刷新落库后点一下就拿到最新一版，不用重建模板
+                q = parse_qs(u.query)
+                try:
+                    body, fname, ctype = export_jobs.export(
+                        q, output_dir or os.path.dirname(html_path or ""))
+                except Exception as e:
+                    self._send({"ok": False, "msg": f"导出失败：{e}"}, status=500)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="jobs.xlsx"; filename*=UTF-8\'\''
+                                 + quote(fname))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            elif u.path == "/api/account":
+                # 刷新期间浏览器被采集器占着，不去抢 CDP，直接回上次探测结果
+                out = output_dir or os.path.dirname(html_path or "")
+                if manager and manager.is_running():
+                    state = account_probe.load_state(out)
+                    self._send(dict(state or {"known": False}, stale=True,
+                                    msg="刷新中，账号信息沿用上次探测"))
+                else:
+                    try:
+                        self._send(account_probe.observe(out, port))
+                    except Exception as e:
+                        self._send(dict(account_probe.load_state(out) or {"known": False},
+                                        error=str(e)))
             elif u.path in ("/api/trends", "/api/jobs"):
                 name = "trends.json" if u.path == "/api/trends" else "岗位公司信息_含JD.json"
                 path = os.path.join(output_dir or os.path.dirname(html_path or ""), name)
