@@ -233,17 +233,24 @@ def server_cmd(out, dashboard, interval):
     ]
 
 
-def server_up():
+def server_up(retries=2, delay=1.5):
     """只有回的是我们自己的 /api/status 才算在跑。
 
     只看端口能不能连会误判：别的程序占着 8765 时，启动器会以为工作台已在运行，
     然后打开一个空页面。
+
+    刚启动的 10 秒里进程在 import 与绑端口，偶尔一次探测会超时；这里重试几次，
+    避免 status/看护把「正在启动」当成「已挂掉」。
     """
-    try:
-        d = http_json(f"http://127.0.0.1:{LOCAL_PORT}/api/status", timeout=8)
-        return isinstance(d, dict) and ("cdp" in d or "profile" in d)
-    except Exception:
-        return False
+    for i in range(max(1, retries + 1)):
+        try:
+            d = http_json(f"http://127.0.0.1:{LOCAL_PORT}/api/status", timeout=8)
+            return isinstance(d, dict) and ("cdp" in d or "profile" in d)
+        except Exception:
+            pass
+        if i < retries:
+            time.sleep(delay)
+    return False
 
 
 def port_pid(port):
