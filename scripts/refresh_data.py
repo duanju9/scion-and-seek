@@ -505,7 +505,9 @@ def _refresh_locked(cfg, state_path, state, log, now, run_keyword, all_keywords,
             # 原始输出里往往只有 ConnectionReset，看不出是「浏览器没了」还是「被风控」。
             # 先探一次 CDP，把判断写在错误里，省得下一轮又猜。
             hint = "" if _cdp_ok(cfg["cdp_port"]) else "CDP 不可用（浏览器已退出或端口被占）："
-            tail = " | ".join(str(x) for x in log[-3:])[-260:]
+            tail = " ".join(str(x) for x in log[-2:])[-240:]
+            if " " in tail:      # 从空白处切，避免露出 "nnectionError" 这种半截词
+                tail = tail.split(" ", 1)[1]
             raise RuntimeError(f"{hint}列表采集失败，已保留上次数据。最后输出：{tail}")
         if not jobs:
             raise RuntimeError("列表采集返回 0 条（登录态失效或触发风控），已保留上次数据；"
